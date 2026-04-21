@@ -35,7 +35,7 @@ namespace stdexec = cuda::std::execution;
 template <int ThreadsPerBlock>
 struct merge_sort_tuning
 {
-  _CCCL_API constexpr auto operator()(cuda::compute_capability) const -> cub::detail::merge_sort::merge_sort_policy
+  _CCCL_API constexpr auto operator()(cuda::compute_capability) const -> cub::MergeSortPolicy
   {
     return {ThreadsPerBlock, 1, cub::BLOCK_LOAD_DIRECT, cub::LOAD_DEFAULT, cub::BLOCK_STORE_DIRECT};
   }
