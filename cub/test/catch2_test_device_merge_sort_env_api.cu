@@ -185,7 +185,7 @@ C2H_TEST("cub::DeviceMergeSort::StableSortKeysCopy env-based API", "[merge_sort]
 }
 
 // example-begin sort-pairs-policy-selector
-struct my_policy_selector
+struct MyPolicySelector
 {
   __host__ __device__ constexpr auto operator()(cuda::arch_id arch) const -> cub::MergeSortPolicy
   {
@@ -209,7 +209,7 @@ C2H_TEST("cub::DeviceMergeSort::SortPairs env-based API", "[merge_sort][env]")
     d_values.data(),
     d_keys.size(),
     cuda::std::less{},
-    cuda::execution::__tune(my_policy_selector{})); // TODO(bgruber): make cuda::execution::__tune public
+    cuda::execution::__tune(MyPolicySelector{})); // TODO(bgruber): make cuda::execution::__tune public
   if (error != cudaSuccess)
   {
     std::cerr << "cub::DeviceMergeSort::SortPairs failed with status: " << error << '\n';
