@@ -184,6 +184,8 @@ C2H_TEST("cub::DeviceMergeSort::StableSortKeysCopy env-based API", "[merge_sort]
   REQUIRE(d_keys_out == expected_keys);
 }
 
+#if _CCCL_STD_VER >= 2020
+
 // example-begin sort-pairs-policy-selector
 struct MyPolicySelector
 {
@@ -223,3 +225,5 @@ C2H_TEST("cub::DeviceMergeSort::SortPairs env-based API", "[merge_sort][env]")
   REQUIRE(d_keys == expected_keys);
   REQUIRE(d_values == expected_values);
 }
+
+#endif // _CCCL_STD_VER >= 2020
