@@ -207,11 +207,7 @@ C2H_TEST("cub::DeviceMergeSort::SortPairs env-based API", "[merge_sort][env]")
   auto d_values = thrust::device_vector<int>{0, 1, 2, 3, 4, 5, 6};
 
   const auto error = cub::DeviceMergeSort::SortPairs(
-    d_keys.data(),
-    d_values.data(),
-    d_keys.size(),
-    cuda::std::less{},
-    cuda::execution::__tune(MyPolicySelector{})); // TODO(bgruber): make cuda::execution::__tune public
+    d_keys.data(), d_values.data(), d_keys.size(), cuda::std::less{}, cuda::execution::tune(MyPolicySelector{}));
   if (error != cudaSuccess)
   {
     std::cerr << "cub::DeviceMergeSort::SortPairs failed with status: " << error << '\n';
