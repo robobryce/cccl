@@ -101,15 +101,46 @@ struct warp_segmented_scan_policy
   }
 #endif // !_CCCL_COMPILER(NVRTC)
 };
+
+struct thread_segmented_scan_policy
+{
+  int threads_per_block;
+  int items_per_thread;
+  CacheLoadModifier load_modifier;
+
+  [[nodiscard]] _CCCL_API constexpr friend bool
+  operator==(const thread_segmented_scan_policy& lhs, const thread_segmented_scan_policy& rhs)
+  {
+    return lhs.threads_per_block == rhs.threads_per_block && lhs.items_per_thread == rhs.items_per_thread
+        && lhs.load_modifier == rhs.load_modifier;
+  }
+
+  [[nodiscard]] _CCCL_API constexpr friend bool
+  operator!=(const thread_segmented_scan_policy& lhs, const thread_segmented_scan_policy& rhs)
+  {
+    return !(lhs == rhs);
+  }
+
+#if !_CCCL_COMPILER(NVRTC)
+  friend ::std::ostream& operator<<(::std::ostream& os, const thread_segmented_scan_policy& policy)
+  {
+    return os
+        << "thread_segmented_scan_policy { .threads_per_block = " << policy.threads_per_block
+        << ", .items_per_thread = " << policy.items_per_thread << ", .load_modifier = " << policy.load_modifier << " }";
+  }
+#endif // !_CCCL_COMPILER(NVRTC)
+};
+
 struct segmented_scan_policy
 {
   block_segmented_scan_policy block;
   warp_segmented_scan_policy warp;
+  thread_segmented_scan_policy thread;
 
   [[nodiscard]] _CCCL_API constexpr friend bool
   operator==(const segmented_scan_policy& lhs, const segmented_scan_policy& rhs)
   {
-    return lhs.block == rhs.block && lhs.warp == rhs.warp;
+    return lhs.block == rhs.block && lhs.warp == rhs.warp && lhs.thread == rhs.thread;
   }
 
   [[nodiscard]] _CCCL_API constexpr friend bool
@@ -121,7 +152,8 @@ struct segmented_scan_policy
 #if !_CCCL_COMPILER(NVRTC)
   friend ::std::ostream& operator<<(::std::ostream& os, const segmented_scan_policy& policy)
   {
-    return os << "segmented_scan_policy { .block = " << policy.block << ", .warp = " << policy.warp << " }";
+    return os << "segmented_scan_policy { .block = " << policy.block << ", .warp = " << policy.warp
+              << ", .thread = " << policy.thread << " }";
   }
 #endif // !_CCCL_COMPILER(NVRTC)
 };
@@ -157,6 +189,7 @@ struct policy_selector
     const auto block_scaled =
       scale_mem_bound(nominal_threads_per_block, nominal_items_per_thread, augmented_size_block);
     const auto warp_scaled = scale_mem_bound(nominal_threads_per_block, nominal_items_per_thread, augmented_size_warp);
+    const auto thread_scaled = scale_mem_bound(nominal_threads_per_block, nominal_items_per_thread, accum_size);
 
     const bool large_values = augmented_size_block > 128;
     const auto scan_transposed_blockload =
@@ -179,7 +212,8 @@ struct policy_selector
         WARP_LOAD_TRANSPOSE,
         LOAD_DEFAULT,
         WARP_STORE_TRANSPOSE,
-        max_segments_per_warp}};
+        max_segments_per_warp},
+      thread_segmented_scan_policy{thread_scaled.threads_per_block, thread_scaled.items_per_thread, LOAD_DEFAULT}};
   }
 };
 

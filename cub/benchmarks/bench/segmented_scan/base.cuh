@@ -52,7 +52,8 @@ struct policy_selector_t
         TUNE_WARP_LOAD_ALGORITHM,
         TUNE_LOAD_MODIFIER,
         TUNE_WARP_STORE_ALGORITHM,
-        MaxSegmentsPerWarp}};
+        MaxSegmentsPerWarp},
+      cub::detail::segmented_scan::thread_segmented_scan_policy{ThreadsPerBlock, ItemsPerThread, TUNE_LOAD_MODIFIER}};
   }
 };
 #endif // TUNE_BASE
@@ -132,9 +133,13 @@ static void bench_impl(nvbench::state& state, nvbench::type_list<T, OffsetT>)
     {
       return cub::detail::segmented_scan::worker::warp;
     }
+    else if (token == "thread")
+    {
+      return cub::detail::segmented_scan::worker::thread;
+    }
     else
     {
-      throw std::runtime_error("Unrecognized value of Worker{io} axis value. Expected 'block' or 'warp'.");
+      throw std::runtime_error("Unrecognized value of Worker{io} axis value. Expected 'block', 'warp', or 'thread'.");
     }
   }(state.get_string("Worker{io}"));
 
