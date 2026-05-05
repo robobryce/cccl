@@ -98,7 +98,7 @@ struct lowest_cc_resolver<CcMult, ::cuda::std::integer_sequence<int, CudaCcs...>
 
 // GCC below 12 ICEs in some cases when creating an integral_constant holding a policy
 #  if _CCCL_STD_VER >= 2020 && _CCCL_COMPILER(GCC, <, 12)
-template <auto P>
+template <typename Tp, Tp P>
 struct policy_constant
 {
   _CCCL_API constexpr auto operator()() const noexcept
@@ -107,8 +107,8 @@ struct policy_constant
   }
 };
 #  else // _CCCL_STD_VER >= 2020 && _CCCL_COMPILER(GCC, <, 12)
-template <auto P>
-using policy_constant = ::cuda::std::integral_constant<decltype(P), P>;
+template <typename Tp, Tp P> // using <auto P> will miscompile on GCC 12
+using policy_constant = ::cuda::std::integral_constant<Tp, P>;
 #  endif // _CCCL_STD_VER >= 2020 && _CCCL_COMPILER(GCC, <, 12)
 
 template <int CcMult, int... CudaCcs, typename PolicySelector, typename FunctorT, size_t... Is>
@@ -123,9 +123,10 @@ CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_to_cc_list(
   // In C++20, we just create an integral_constant holding the policy, because policies are structural types in C++20.
   // This causes f to be only instantiated for each distinct policy, since the same policy for different arches results
   // in the same integral_constant type passed to f
+  using policy_t = decltype(policy_selector(::cuda::compute_capability{}));
   (...,
    (device_cc == ::cuda::compute_capability{(CudaCcs * CcMult) / 10}
-      ? (e = f(policy_constant<policy_selector(::cuda::compute_capability{(CudaCcs * CcMult) / 10})>{}))
+      ? (e = f(policy_constant<policy_t, policy_selector(::cuda::compute_capability{(CudaCcs * CcMult) / 10})>{}))
       : cudaSuccess));
 #  else // if _CCCL_STD_VER >= 2020
   // In C++17, we have to collapse architectures with the same policies ourselves, so we instantiate call_for_arch once
