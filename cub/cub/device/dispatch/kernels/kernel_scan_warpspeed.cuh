@@ -44,7 +44,7 @@ namespace detail::scan
 namespace __cub_detail  = CUB_NS_QUALIFIER::detail;
 namespace __scan_detail = CUB_NS_QUALIFIER::detail::scan;
 
-_CCCL_API constexpr int num_total_threads(const scan_warpspeed_policy& policy)
+_CCCL_API constexpr int num_total_threads(const ScanWarpspeedPolicy& policy)
 {
   const auto num_total_warps = 2 * policy.num_reduce_and_scan_warps + 1 /*num_load_warps*/
                              + 1 /*num_sched_warps*/ + 1 /*num_look_ahead_warps*/;
@@ -52,7 +52,7 @@ _CCCL_API constexpr int num_total_threads(const scan_warpspeed_policy& policy)
 }
 
 template <typename PolicySelector>
-_CCCL_DEVICE_API constexpr scan_warpspeed_policy get_warpspeed_policy() noexcept
+_CCCL_DEVICE_API constexpr ScanWarpspeedPolicy get_warpspeed_policy() noexcept
 {
   return current_policy<PolicySelector>().warpspeed;
 }
@@ -71,7 +71,7 @@ struct scanKernelParams
 template <typename PolicySelector, typename InputT, typename OutputT, typename AccumT>
 struct ScanResources
 {
-  static constexpr scan_warpspeed_policy policy = get_warpspeed_policy<PolicySelector>();
+  static constexpr ScanWarpspeedPolicy policy = get_warpspeed_policy<PolicySelector>();
 
   // align to at least 16 bytes (InputT/OutputT may be aligned higher) so each stage starts correctly aligned
   struct alignas(::cuda::std::max({::cuda::std::size_t{16}, alignof(InputT), alignof(OutputT)})) InOutT
@@ -281,7 +281,7 @@ _CCCL_DEVICE_API _CCCL_FORCEINLINE void kernelBody(
   RealInitValueT real_init_value,
   ScanResources<PolicySelector, InputT, OutputT, AccumT>& res)
 {
-  static constexpr scan_warpspeed_policy policy        = get_warpspeed_policy<PolicySelector>();
+  static constexpr ScanWarpspeedPolicy policy          = get_warpspeed_policy<PolicySelector>();
   static constexpr warpspeed::SquadDesc squadReduce    = squad_reduce(policy);
   static constexpr warpspeed::SquadDesc squadScanStore = squad_scan_store(policy);
   static constexpr warpspeed::SquadDesc squadLoad      = squad_load(policy);
@@ -802,7 +802,7 @@ _CCCL_DEVICE_API _CCCL_FORCEINLINE void device_scan_warpspeed_body(
   // Cache special registers at start of kernel
   warpspeed::SpecialRegisters specialRegisters = warpspeed::getSpecialRegisters();
 
-  static constexpr scan_warpspeed_policy policy = get_warpspeed_policy<PolicySelector>();
+  static constexpr ScanWarpspeedPolicy policy = get_warpspeed_policy<PolicySelector>();
 
   // Dispatch for warp-specialization
   static constexpr warpspeed::SquadDesc scanSquads[] = {
@@ -864,7 +864,7 @@ device_scan_init_warpspeed_body(warpspeed::tile_state_t<AccumT>* tile_states, co
 }
 
 template <typename InputT, typename OutputT, typename AccumT>
-_CCCL_API constexpr auto smem_for_stages(const scan_warpspeed_policy& policy, int num_stages) -> int
+_CCCL_API constexpr auto smem_for_stages(const ScanWarpspeedPolicy& policy, int num_stages) -> int
 {
   return smem_for_stages(
     policy,

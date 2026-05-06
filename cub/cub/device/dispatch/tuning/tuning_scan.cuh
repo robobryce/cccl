@@ -43,6 +43,127 @@
 
 CUB_NAMESPACE_BEGIN
 
+//! The algorithm used by the scan policy.
+enum class ScanAlgorithm
+{
+  lookback,
+  warpspeed
+};
+
+#if _CCCL_HOSTED()
+inline ::std::ostream& operator<<(::std::ostream& os, ScanAlgorithm algorithm)
+{
+  switch (algorithm)
+  {
+    case ScanAlgorithm::lookback:
+      return os << "ScanAlgorithm::lookback";
+    case ScanAlgorithm::warpspeed:
+      return os << "ScanAlgorithm::warpspeed";
+    default:
+      return os << "ScanAlgorithm::<unknown>";
+  }
+}
+#endif // _CCCL_HOSTED()
+
+//! The tuning policy for the lookback scan algorithm in @ref DeviceScan.
+struct ScanLookbackPolicy
+{
+  int threads_per_block; //!< Number of threads in a CUDA block
+  int items_per_thread; //!< Number of items processed per thread
+  BlockLoadAlgorithm load_algorithm; //!< The @ref BlockLoadAlgorithm used for loading items from global memory
+  CacheLoadModifier load_modifier; //!< The @ref CacheLoadModifier used for loading items from global memory
+  BlockStoreAlgorithm store_algorithm; //!< The @ref BlockStoreAlgorithm used for storing items to global memory
+  BlockScanAlgorithm scan_algorithm; //!< The @ref BlockScanAlgorithm used for scanning within a thread block
+  detail::delay_constructor_policy delay_constructor; //!< The delay constructor policy
+
+  [[nodiscard]] _CCCL_API constexpr friend bool operator==(const ScanLookbackPolicy& lhs, const ScanLookbackPolicy& rhs)
+  {
+    return lhs.threads_per_block == rhs.threads_per_block && lhs.items_per_thread == rhs.items_per_thread
+        && lhs.load_algorithm == rhs.load_algorithm && lhs.load_modifier == rhs.load_modifier
+        && lhs.store_algorithm == rhs.store_algorithm && lhs.scan_algorithm == rhs.scan_algorithm
+        && lhs.delay_constructor == rhs.delay_constructor;
+  }
+
+  [[nodiscard]] _CCCL_API constexpr friend bool operator!=(const ScanLookbackPolicy& lhs, const ScanLookbackPolicy& rhs)
+  {
+    return !(lhs == rhs);
+  }
+
+#if _CCCL_HOSTED()
+  friend ::std::ostream& operator<<(::std::ostream& os, const ScanLookbackPolicy& p)
+  {
+    return os
+        << "ScanLookbackPolicy { .threads_per_block = " << p.threads_per_block
+        << ", .items_per_thread = " << p.items_per_thread << ", .load_algorithm = " << p.load_algorithm
+        << ", .load_modifier = " << p.load_modifier << ", .store_algorithm = " << p.store_algorithm
+        << ", .scan_algorithm = " << p.scan_algorithm << ", .delay_constructor = " << p.delay_constructor << " }";
+  }
+#endif // _CCCL_HOSTED()
+};
+
+//! The tuning policy for the warpspeed scan algorithm in @ref DeviceScan.
+struct ScanWarpspeedPolicy
+{
+  int num_reduce_and_scan_warps; //!< Number of warps used for reduction and scanning
+  int look_ahead_items_per_thread; //!< Number of look-ahead items per thread in the lookback warp
+  int items_per_thread; //!< Number of items processed per reduction and scanning thread
+
+  //! Returns the tile size for this policy.
+  _CCCL_API constexpr int tile_size() const noexcept
+  {
+    return items_per_thread * num_reduce_and_scan_warps * detail::warp_threads;
+  }
+
+  [[nodiscard]] _CCCL_API constexpr friend bool
+  operator==(const ScanWarpspeedPolicy& lhs, const ScanWarpspeedPolicy& rhs)
+  {
+    return lhs.num_reduce_and_scan_warps == rhs.num_reduce_and_scan_warps
+        && lhs.look_ahead_items_per_thread == rhs.look_ahead_items_per_thread
+        && lhs.items_per_thread == rhs.items_per_thread;
+  }
+
+  [[nodiscard]] _CCCL_API constexpr friend bool
+  operator!=(const ScanWarpspeedPolicy& lhs, const ScanWarpspeedPolicy& rhs)
+  {
+    return !(lhs == rhs);
+  }
+
+#if _CCCL_HOSTED()
+  friend ::std::ostream& operator<<(::std::ostream& os, const ScanWarpspeedPolicy& p)
+  {
+    return os << "ScanWarpspeedPolicy { .num_reduce_and_scan_warps = " << p.num_reduce_and_scan_warps
+              << ", .look_ahead_items_per_thread = " << p.look_ahead_items_per_thread
+              << ", .items_per_thread = " << p.items_per_thread << " }";
+  }
+#endif // _CCCL_HOSTED()
+};
+
+//! The tuning policy for all algorithms in @ref DeviceScan.
+struct ScanPolicy
+{
+  ScanAlgorithm algorithm; //!< The scan algorithm to use
+  ScanLookbackPolicy lookback; //!< The lookback scan policy (used when algorithm is lookback, otherwise ignored)
+  ScanWarpspeedPolicy warpspeed; //!< The warpspeed scan policy (used when algorithm is warpspeed, otherwise ignored)
+
+  [[nodiscard]] _CCCL_API constexpr friend bool operator==(const ScanPolicy& lhs, const ScanPolicy& rhs)
+  {
+    return lhs.lookback == rhs.lookback && lhs.warpspeed == rhs.warpspeed && lhs.algorithm == rhs.algorithm;
+  }
+
+  [[nodiscard]] _CCCL_API constexpr friend bool operator!=(const ScanPolicy& lhs, const ScanPolicy& rhs)
+  {
+    return !(lhs == rhs);
+  }
+
+#if _CCCL_HOSTED()
+  friend ::std::ostream& operator<<(::std::ostream& os, const ScanPolicy& p)
+  {
+    return os << "ScanPolicy { .algorithm = " << p.algorithm << ", .lookback = " << p.lookback
+              << ", .warpspeed = " << p.warpspeed << " }";
+  }
+#endif // _CCCL_HOSTED()
+};
+
 namespace detail::scan
 {
 // TODO(bgruber): remove this in CCCL 4.0 when we remove the public scan dispatcher
@@ -547,123 +668,9 @@ struct policy_hub
   using MaxPolicy = Policy1000;
 };
 
-struct scan_lookback_policy
-{
-  int threads_per_block;
-  int items_per_thread;
-  BlockLoadAlgorithm load_algorithm;
-  CacheLoadModifier load_modifier;
-  BlockStoreAlgorithm store_algorithm;
-  BlockScanAlgorithm scan_algorithm;
-  delay_constructor_policy delay_constructor;
-
-  _CCCL_API constexpr friend bool operator==(const scan_lookback_policy& lhs, const scan_lookback_policy& rhs)
-  {
-    return lhs.threads_per_block == rhs.threads_per_block && lhs.items_per_thread == rhs.items_per_thread
-        && lhs.load_algorithm == rhs.load_algorithm && lhs.load_modifier == rhs.load_modifier
-        && lhs.store_algorithm == rhs.store_algorithm && lhs.scan_algorithm == rhs.scan_algorithm
-        && lhs.delay_constructor == rhs.delay_constructor;
-  }
-
-  _CCCL_API constexpr friend bool operator!=(const scan_lookback_policy& lhs, const scan_lookback_policy& rhs)
-  {
-    return !(lhs == rhs);
-  }
-
-#if _CCCL_HOSTED()
-  friend ::std::ostream& operator<<(::std::ostream& os, const scan_lookback_policy& p)
-  {
-    return os
-        << "scan_lookback_policy { .threads_per_block = " << p.threads_per_block
-        << ", .items_per_thread = " << p.items_per_thread << ", .load_algorithm = " << p.load_algorithm
-        << ", .load_modifier = " << p.load_modifier << ", .store_algorithm = " << p.store_algorithm
-        << ", .scan_algorithm = " << p.scan_algorithm << ", .delay_constructor = " << p.delay_constructor << " }";
-  }
-#endif // _CCCL_HOSTED()
-};
-
-struct scan_warpspeed_policy
-{
-  int num_reduce_and_scan_warps;
-  int look_ahead_items_per_thread;
-  int items_per_thread;
-
-  _CCCL_API constexpr int tile_size() const noexcept
-  {
-    return items_per_thread * num_reduce_and_scan_warps * warp_threads;
-  }
-
-  _CCCL_API constexpr friend bool operator==(const scan_warpspeed_policy& lhs, const scan_warpspeed_policy& rhs)
-  {
-    return lhs.num_reduce_and_scan_warps == rhs.num_reduce_and_scan_warps
-        && lhs.look_ahead_items_per_thread == rhs.look_ahead_items_per_thread
-        && lhs.items_per_thread == rhs.items_per_thread;
-  }
-
-  _CCCL_API constexpr friend bool operator!=(const scan_warpspeed_policy& lhs, const scan_warpspeed_policy& rhs)
-  {
-    return !(lhs == rhs);
-  }
-
-#if _CCCL_HOSTED()
-  friend ::std::ostream& operator<<(::std::ostream& os, const scan_warpspeed_policy& p)
-  {
-    return os << "scan_warpspeed_policy { .num_reduce_and_scan_warps = " << p.num_reduce_and_scan_warps
-              << ", .look_ahead_items_per_thread = " << p.look_ahead_items_per_thread
-              << ", .items_per_thread = " << p.items_per_thread << " }";
-  }
-#endif // _CCCL_HOSTED()
-};
-
-enum class scan_algorithm
-{
-  lookback,
-  warpspeed
-};
-
-#if _CCCL_HOSTED()
-inline ::std::ostream& operator<<(::std::ostream& os, scan_algorithm algorithm)
-{
-  switch (algorithm)
-  {
-    case scan_algorithm::lookback:
-      return os << "scan_algorithm::lookback";
-    case scan_algorithm::warpspeed:
-      return os << "scan_algorithm::warpspeed";
-    default:
-      return os << "scan_algorithm::<unknown>";
-  }
-}
-#endif // _CCCL_HOSTED()
-
-struct scan_policy
-{
-  scan_algorithm algorithm;
-  scan_lookback_policy lookback;
-  scan_warpspeed_policy warpspeed;
-
-  _CCCL_API constexpr friend bool operator==(const scan_policy& lhs, const scan_policy& rhs)
-  {
-    return lhs.lookback == rhs.lookback && lhs.warpspeed == rhs.warpspeed && lhs.algorithm == rhs.algorithm;
-  }
-
-  _CCCL_API constexpr friend bool operator!=(const scan_policy& lhs, const scan_policy& rhs)
-  {
-    return !(lhs == rhs);
-  }
-
-#if _CCCL_HOSTED()
-  friend ::std::ostream& operator<<(::std::ostream& os, const scan_policy& p)
-  {
-    return os << "scan_policy { .algorithm = " << p.algorithm << ", .lookback = " << p.lookback
-              << ", .warpspeed = " << p.warpspeed << " }";
-  }
-#endif // _CCCL_HOSTED()
-};
-
 #if _CCCL_HAS_CONCEPTS()
 template <typename T>
-concept scan_policy_selector = policy_selector<T, scan_policy>;
+concept scan_policy_selector = policy_selector<T, ScanPolicy>;
 #endif // _CCCL_HAS_CONCEPTS()
 
 _CCCL_API constexpr auto make_mem_scaled_lookback_scan_policy(
@@ -674,12 +681,12 @@ _CCCL_API constexpr auto make_mem_scaled_lookback_scan_policy(
   CacheLoadModifier load_modifier,
   BlockStoreAlgorithm store_algorithm,
   BlockScanAlgorithm scan_algorithm,
-  delay_constructor_policy delay_constructor = {delay_constructor_kind::fixed_delay, 350, 450}) -> scan_policy
+  delay_constructor_policy delay_constructor = {delay_constructor_kind::fixed_delay, 350, 450}) -> ScanPolicy
 {
   const auto scaled = scale_mem_bound(nominal_4b_threads_per_block, nominal_4b_items_per_thread, compute_t_size);
-  return scan_policy{
-    scan_algorithm::lookback,
-    scan_lookback_policy{
+  return ScanPolicy{
+    ScanAlgorithm::lookback,
+    ScanLookbackPolicy{
       scaled.threads_per_block,
       scaled.items_per_thread,
       load_algorithm,
@@ -687,30 +694,30 @@ _CCCL_API constexpr auto make_mem_scaled_lookback_scan_policy(
       store_algorithm,
       scan_algorithm,
       delay_constructor},
-    scan_warpspeed_policy{}};
+    ScanWarpspeedPolicy{}};
 }
 
-_CCCL_API constexpr warpspeed::SquadDesc squad_reduce(const scan_warpspeed_policy& policy)
+_CCCL_API constexpr warpspeed::SquadDesc squad_reduce(const ScanWarpspeedPolicy& policy)
 {
   return warpspeed::SquadDesc{0, policy.num_reduce_and_scan_warps};
 }
 
-_CCCL_API constexpr warpspeed::SquadDesc squad_scan_store(const scan_warpspeed_policy& policy)
+_CCCL_API constexpr warpspeed::SquadDesc squad_scan_store(const ScanWarpspeedPolicy& policy)
 {
   return warpspeed::SquadDesc{1, policy.num_reduce_and_scan_warps};
 }
 
-_CCCL_API constexpr warpspeed::SquadDesc squad_load(const scan_warpspeed_policy&)
+_CCCL_API constexpr warpspeed::SquadDesc squad_load(const ScanWarpspeedPolicy&)
 {
   return warpspeed::SquadDesc{2, 1}; // no point in being more than 1 warp
 }
 
-_CCCL_API constexpr warpspeed::SquadDesc squad_sched(const scan_warpspeed_policy&)
+_CCCL_API constexpr warpspeed::SquadDesc squad_sched(const ScanWarpspeedPolicy&)
 {
   return warpspeed::SquadDesc{3, 1}; // no point in being more than 1 warp
 }
 
-_CCCL_API constexpr warpspeed::SquadDesc squad_lookback(const scan_warpspeed_policy&)
+_CCCL_API constexpr warpspeed::SquadDesc squad_lookback(const ScanWarpspeedPolicy&)
 {
   return warpspeed::SquadDesc{4, 1}; // must have 1 warp
 }
@@ -768,7 +775,7 @@ struct ScanResourcesRaw
 
 template <typename SmemInOutT, typename SmemNextBlockIdxT, typename SmemSumExclusiveCtaT, typename SmemSumThreadAndWarpT>
 _CCCL_API constexpr void setup_scan_resources(
-  const scan_warpspeed_policy& policy,
+  const ScanWarpspeedPolicy& policy,
   warpspeed::SyncHandler& syncHandler,
   warpspeed::SmemAllocator& smemAllocator,
   SmemInOutT& smemInOut,
@@ -798,7 +805,7 @@ _CCCL_API constexpr void setup_scan_resources(
 }
 
 _CCCL_API constexpr auto smem_for_stages(
-  const scan_warpspeed_policy& policy,
+  const ScanWarpspeedPolicy& policy,
   int num_stages,
   int input_size,
   int input_align,
@@ -871,9 +878,9 @@ struct policy_selector
   // TODO(griwes): remove this field before policy_selector is publicly exposed
   bool benchmark_match;
 
-  _CCCL_API constexpr auto get_sm100_fallback_warpspeed_policy() const -> scan_warpspeed_policy
+  _CCCL_API constexpr auto get_sm100_fallback_warpspeed_policy() const -> ScanWarpspeedPolicy
   {
-    scan_warpspeed_policy warpspeed_policy{};
+    ScanWarpspeedPolicy warpspeed_policy{};
 
     // TODO(bgruber): tune this
 #if _CCCL_COMPILER(NVHPC)
@@ -906,7 +913,7 @@ struct policy_selector
     return warpspeed_policy;
   }
 
-  _CCCL_API constexpr auto get_sm120_fallback_warpspeed_policy() const -> scan_warpspeed_policy
+  _CCCL_API constexpr auto get_sm120_fallback_warpspeed_policy() const -> ScanWarpspeedPolicy
   {
     auto policy = get_sm100_fallback_warpspeed_policy();
     if (operation_t == op_kind_t::other && is_arithmetic_type(input_type))
@@ -924,7 +931,7 @@ struct policy_selector
   }
 
   _CCCL_API constexpr auto get_warpspeed_policy(::cuda::compute_capability cc) const
-    -> ::cuda::std::optional<scan_warpspeed_policy>
+    -> ::cuda::std::optional<ScanWarpspeedPolicy>
   {
     if (cc >= ::cuda::compute_capability{12, 0})
     {
@@ -939,14 +946,14 @@ struct policy_selector
         {
           case 1:
             // wrps_4.lbi_8.ipt_160 ()  1.264254  1.264254  1.264254  1.264254
-            return scan_warpspeed_policy{4, 8, 160 - 1};
+            return ScanWarpspeedPolicy{4, 8, 160 - 1};
             // TODO(gonidelis): we found this tuning but it regressed:
             // wrps_3.lbi_4.ipt_96 ()  1.454824  1.247212  1.450590  1.560418
-            // return scan_warpspeed_policy{3, 4, 96 - 1};
+            // return ScanWarpspeedPolicy{3, 4, 96 - 1};
           case 2:
             // TODO(gonidelis): we found this tuning but it regresses large problems, we should revisit this
             // // wrps_4.lbi_2.ipt_96 ()  1.082511  0.929516  1.091523  1.264033
-            // return scan_warpspeed_policy{4, 2, 96 - 1};
+            // return ScanWarpspeedPolicy{4, 2, 96 - 1};
             // clang-format off
             //|   I16   |      I64      |      2^16      |  17.304 us |       1.07% |  15.244 us |       0.77% |    -2.060 us | -11.91% |   FAST   |
             //|   I16   |      I64      |      2^20      |  19.466 us |       1.21% |  17.266 us |       2.93% |    -2.200 us | -11.30% |   FAST   |
@@ -955,21 +962,21 @@ struct policy_selector
             //|   I16   |      I64      |      2^32      |   3.238 ms |       0.53% |   3.429 ms |       0.53% |   191.299 us |   5.91% |   SLOW   |
             // clang-format on
             // wrps_6.lbi_2.ipt_96 ()  1.167633  1.167633  1.167633  1.167633
-            return scan_warpspeed_policy{6, 2, 96 - 1};
+            return ScanWarpspeedPolicy{6, 2, 96 - 1};
           case 4:
             if (input_type == type_t::float32)
             {
               // wrps_4.lbi_3.ipt_88 ()  1.047200  1.002119  1.042654  1.081102
-              return scan_warpspeed_policy{4, 3, 88 - 1};
+              return ScanWarpspeedPolicy{4, 3, 88 - 1};
             }
             // wrps_4.lbi_3.ipt_80 ()  1.019078  0.999708  1.017346  1.052592
-            return scan_warpspeed_policy{4, 3, 80 - 1};
+            return ScanWarpspeedPolicy{4, 3, 80 - 1};
           case 8:
             // wrps_2.lbi_5.ipt_88 ()  1.085781   1.0  1.079245  1.103545
-            return scan_warpspeed_policy{2, 5, 88 - 1};
+            return ScanWarpspeedPolicy{2, 5, 88 - 1};
           case 16:
             // wrps_5.lbi_8.ipt_16 ()  1.159883  1.000000  1.143709  1.275821
-            return scan_warpspeed_policy{5, 8, 16 - 1};
+            return ScanWarpspeedPolicy{5, 8, 16 - 1};
             // TODO(bgruber): tune for more data types
           default:
             break;
@@ -981,7 +988,7 @@ struct policy_selector
     return {};
   }
 
-  _CCCL_API constexpr bool can_use_warpspeed([[maybe_unused]] const scan_warpspeed_policy& warpspeed_policy) const
+  _CCCL_API constexpr bool can_use_warpspeed([[maybe_unused]] const ScanWarpspeedPolicy& warpspeed_policy) const
   {
     // We need `cuda::std::is_constant_evaluated` for the compile-time SMEM computation. And we need PTX ISA 8.6.
     // MSVC + nvcc < 13.1 just fails to compile `cub.test.device.scan.lid_1.types_0` with `Internal error` and nothing
@@ -1014,14 +1021,14 @@ struct policy_selector
 #endif
   }
 
-  [[nodiscard]] _CCCL_API constexpr auto operator()(::cuda::compute_capability cc) const -> scan_policy
+  [[nodiscard]] _CCCL_API constexpr auto operator()(::cuda::compute_capability cc) const -> ScanPolicy
   {
     // we first try to get the valid warpspeed implementation. if we can't run it, fall back to the old scan impl.
     {
       const auto warpspeed_policy_opt = get_warpspeed_policy(cc);
       if (warpspeed_policy_opt && can_use_warpspeed(*warpspeed_policy_opt))
       {
-        return {scan_algorithm::warpspeed, scan_lookback_policy{}, *warpspeed_policy_opt};
+        return {ScanAlgorithm::warpspeed, ScanLookbackPolicy{}, *warpspeed_policy_opt};
       }
     }
 
@@ -1428,7 +1435,7 @@ struct benchmark_match_for_policy_selector<
 template <typename InputIteratorT, typename OutputIteratorT, typename AccumT, typename OffsetT, typename ScanOpT>
 struct policy_selector_from_types
 {
-  [[nodiscard]] _CCCL_API constexpr auto operator()(::cuda::compute_capability cc) const -> scan_policy
+  [[nodiscard]] _CCCL_API constexpr auto operator()(::cuda::compute_capability cc) const -> ScanPolicy
   {
     using InputValueT  = it_value_t<InputIteratorT>;
     using OutputValueT = it_value_t<OutputIteratorT>;
