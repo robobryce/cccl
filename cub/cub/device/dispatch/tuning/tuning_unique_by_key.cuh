@@ -38,7 +38,7 @@ struct unique_by_key_policy
   BlockLoadAlgorithm load_algorithm;
   CacheLoadModifier load_modifier;
   BlockScanAlgorithm scan_algorithm;
-  delay_constructor_policy delay_constructor;
+  LookbackDelayPolicy delay_constructor;
 
   _CCCL_API constexpr friend bool operator==(const unique_by_key_policy& lhs, const unique_by_key_policy& rhs)
   {
@@ -882,7 +882,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_LDG,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::fixed_delay, 350, 450}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 350, 450}};
   }
 
   [[nodiscard]] _CCCL_API constexpr auto get_sm100_tuning() const -> ::cuda::std::optional<unique_by_key_policy>
@@ -907,7 +907,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 948, 955}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 948, 955}};
             case 2:
               // ipt_14.tpb_512.trp_0.ld_0.ns_1228.dcid_7.l2w_320 1.151229  1.007229  1.151131  1.443520
               return unique_by_key_policy{
@@ -916,7 +916,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 1228, 320}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 1228, 320}};
             case 4:
               // ipt_14.tpb_512.trp_0.ld_0.ns_2016.dcid_7.l2w_620 1.165300  1.095238  1.164478  1.266667
               return unique_by_key_policy{
@@ -925,7 +925,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 2016, 620}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 2016, 620}};
             case 8:
               // ipt_10.tpb_384.trp_0.ld_0.ns_1728.dcid_5.l2w_980 1.118716  0.997167  1.116537  1.400000
               return unique_by_key_policy{
@@ -934,7 +934,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 1728, 980}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 1728, 980}};
             default:
               return {};
           }
@@ -949,7 +949,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 508, 1020}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 508, 1020}};
             case 2:
               // ipt_12.tpb_384.trp_0.ld_0.ns_928.dcid_7.l2w_605 1.166564  0.997579  1.154805  1.406709
               return unique_by_key_policy{
@@ -958,7 +958,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 928, 605}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 928, 605}};
             case 4:
               // ipt_11.tpb_384.trp_0.ld_1.ns_1620.dcid_7.l2w_810 1.144483  1.011085  1.152798  1.393750
               return unique_by_key_policy{
@@ -967,7 +967,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_CA,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 1620, 810}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 1620, 810}};
             case 8:
               // ipt_10.tpb_384.trp_0.ld_0.ns_1984.dcid_5.l2w_935 1.605554  1.177083  1.564488  1.946224
               return unique_by_key_policy{
@@ -976,7 +976,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 1984, 935}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 1984, 935}};
             default:
               return {};
           }
@@ -991,7 +991,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 1136, 605}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 1136, 605}};
             case 2:
               // ipt_11.tpb_384.trp_0.ld_0.ns_656.dcid_7.l2w_825 1.216312  1.090485  1.211800  1.535714
               return unique_by_key_policy{
@@ -1000,7 +1000,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon, 656, 825}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon, 656, 825}};
             case 8:
               // ipt_10.tpb_384.trp_0.ld_0.ns_1012.dcid_5.l2w_800 1.164713  1.014819  1.174307  1.526042
               return unique_by_key_policy{
@@ -1009,7 +1009,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 1012, 800}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 1012, 800}};
             default:
               return {};
           }
@@ -1024,7 +1024,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 864, 1130}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 864, 1130}};
             case 4:
               // ipt_10.tpb_384.trp_0.ld_0.ns_772.dcid_5.l2w_665 1.152243  1.019816  1.166636  1.517526
               return unique_by_key_policy{
@@ -1033,7 +1033,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::exponential_backon_jitter_window, 772, 665}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::exponential_backon_jitter_window, 772, 665}};
             default:
               return {};
           }
@@ -1066,7 +1066,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 550}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 550}};
             case 2:
               return unique_by_key_policy{
                 448,
@@ -1074,7 +1074,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 725}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 725}};
             case 4:
               return unique_by_key_policy{
                 256,
@@ -1082,7 +1082,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1130}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1130}};
             case 8:
               return unique_by_key_policy{
                 512,
@@ -1090,7 +1090,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1100}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1100}};
             default:
               return {};
           }
@@ -1104,7 +1104,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 640}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 640}};
             case 2:
               return unique_by_key_policy{
                 288,
@@ -1112,7 +1112,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 404, 710}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 404, 710}};
             case 4:
               return unique_by_key_policy{
                 512,
@@ -1120,7 +1120,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 525}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 525}};
             case 8:
               return unique_by_key_policy{
                 256,
@@ -1128,7 +1128,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1200}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1200}};
             default:
               return {};
           }
@@ -1142,7 +1142,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 348, 580}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 348, 580}};
             case 2:
               return unique_by_key_policy{
                 384,
@@ -1150,7 +1150,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1060}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1060}};
             case 4:
               return unique_by_key_policy{
                 512,
@@ -1158,7 +1158,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1045}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1045}};
             case 8:
               return unique_by_key_policy{
                 512,
@@ -1166,7 +1166,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1120}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1120}};
             default:
               return {};
           }
@@ -1180,7 +1180,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1060}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1060}};
             case 2:
               return unique_by_key_policy{
                 384,
@@ -1188,7 +1188,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 964, 1125}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 964, 1125}};
             case 4:
               return unique_by_key_policy{
                 640,
@@ -1196,7 +1196,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1070}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1070}};
             case 8:
               return unique_by_key_policy{
                 448,
@@ -1204,7 +1204,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1190}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1190}};
             default:
               return {};
           }
@@ -1224,7 +1224,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::fixed_delay, 344, 1165}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 344, 1165}};
         case 2:
           return unique_by_key_policy{
             224,
@@ -1232,7 +1232,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::fixed_delay, 424, 1055}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 424, 1055}};
         case 4:
           return unique_by_key_policy{
             384,
@@ -1240,7 +1240,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1025}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1025}};
         case 8:
           return unique_by_key_policy{
             256,
@@ -1248,7 +1248,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1155}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1155}};
         default:
           return {};
       }
@@ -1278,7 +1278,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 835}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 835}};
             case 2:
               return unique_by_key_policy{
                 256,
@@ -1286,7 +1286,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 765}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 765}};
             case 4:
               return unique_by_key_policy{
                 256,
@@ -1294,7 +1294,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1155}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1155}};
             case 8:
               return unique_by_key_policy{
                 224,
@@ -1302,7 +1302,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1065}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1065}};
             default:
               return {};
           }
@@ -1316,7 +1316,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1020}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1020}};
             case 2:
               return unique_by_key_policy{
                 192,
@@ -1324,7 +1324,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 328, 1080}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 328, 1080}};
             case 4:
               return unique_by_key_policy{
                 256,
@@ -1332,7 +1332,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 535}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 535}};
             case 8:
               return unique_by_key_policy{
                 256,
@@ -1340,7 +1340,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1055}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1055}};
             default:
               return {};
           }
@@ -1354,7 +1354,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1120}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1120}};
             case 2:
               return unique_by_key_policy{
                 256,
@@ -1362,7 +1362,7 @@ private:
                 BLOCK_LOAD_WARP_TRANSPOSE,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1185}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1185}};
             case 4:
               return unique_by_key_policy{
                 256,
@@ -1370,7 +1370,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::no_delay, 0, 1115}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::no_delay, 0, 1115}};
             case 8:
               return unique_by_key_policy{
                 256,
@@ -1378,7 +1378,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 320, 1115}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 320, 1115}};
             default:
               return {};
           }
@@ -1392,7 +1392,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 24, 555}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 24, 555}};
             case 2:
               return unique_by_key_policy{
                 256,
@@ -1400,7 +1400,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 324, 1105}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 324, 1105}};
             case 4:
               return unique_by_key_policy{
                 256,
@@ -1408,7 +1408,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 740, 1105}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 740, 1105}};
             case 8:
               return unique_by_key_policy{
                 192,
@@ -1416,7 +1416,7 @@ private:
                 BLOCK_LOAD_DIRECT,
                 LOAD_DEFAULT,
                 BLOCK_SCAN_WARP_SCANS,
-                delay_constructor_policy{delay_constructor_kind::fixed_delay, 764, 1155}};
+                LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 764, 1155}};
             default:
               return {};
           }
@@ -1436,7 +1436,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::fixed_delay, 248, 1200}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 248, 1200}};
         case 8:
           return unique_by_key_policy{
             128,
@@ -1444,7 +1444,7 @@ private:
             BLOCK_LOAD_WARP_TRANSPOSE,
             LOAD_DEFAULT,
             BLOCK_SCAN_WARP_SCANS,
-            delay_constructor_policy{delay_constructor_kind::fixed_delay, 992, 1135}};
+            LookbackDelayPolicy{LookbackDelayAlgorithm::fixed_delay, 992, 1135}};
         default:
           return {};
       }
