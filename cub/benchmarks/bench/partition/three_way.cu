@@ -26,7 +26,7 @@ struct tuned_policy_selector_t
             TUNE_TRANSPOSE == 0 ? cub::BLOCK_LOAD_DIRECT : cub::BLOCK_LOAD_WARP_TRANSPOSE,
             cub::LOAD_DEFAULT,
             cub::BLOCK_SCAN_WARP_SCANS,
-            cub::detail::delay_constructor_policy_from_type<delay_constructor_t>};
+            cub::detail::lookback_delay_policy_from_type<delay_constructor_t>};
   }
 };
 #endif // !TUNE_BASE
