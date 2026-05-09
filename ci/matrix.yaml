@@ -21,6 +21,7 @@ workflows:
   #       args: '--preset libcudacxx --lit-tests "cuda/utility/basic_any.pass.cpp"' }
   #
   override:
+    - {jobs: ['build'], cudacxx: 'clang', ctk: 'clang-cuda-next', cxx: 'clang-cuda-next', std: 'all', sm: '75;80;90;100;120'}
 
   pull_request:
     # Old CTK: Oldest/newest supported host compilers:
@@ -229,6 +230,7 @@ workflows:
     - {jobs: ['build'], cxx: 'nvhpc',      ctk: 'nvhpc',      std: 'all', project: ['libcudacxx', 'cub', 'thrust', 'cudax', 'stdpar'], cpu: ['amd64', 'arm64']}
     # clang-cuda
     - {jobs: ['build'], cudacxx: 'clang', ctk: 'clang-cuda', cxx: 'clang-cuda', std: 'all', sm: '75;80;90;100;120'}
+    - {jobs: ['build'], cudacxx: 'clang', ctk: 'clang-cuda-next', cxx: 'clang-cuda-next', std: 'all', sm: '75;80;90;100;120'}
     # clang-tidy
     - { jobs: ['build'], project: 'tidy', std: 'min', cxx: ['clang'], cudacxx: ['clang'], ctk: 'clang-cuda', sm: '75' }
     # arch-specific and family-specific arch builds
@@ -321,6 +323,7 @@ workflows:
     - {jobs: ['build'], cxx: 'nvhpc',      ctk: 'nvhpc',      std: 'all', project: ['libcudacxx', 'cub', 'thrust', 'cudax', 'stdpar'], cpu: ['amd64', 'arm64']}
     # clang-cuda
     - {jobs: ['build'], cudacxx: 'clang', ctk: 'clang-cuda', cxx: 'clang-cuda', std: 'all', sm: '75;80;90;100;120'}
+    - {jobs: ['build'], cudacxx: 'clang', ctk: 'clang-cuda-next', cxx: 'clang-cuda-next', std: 'all', sm: '75;80;90;100;120'}
     # compute-sanitizer
     - {jobs: ['compute_sanitizer'], project: 'cub', std: 'max', gpu: 'rtxa6000', sm: 'gpu', cmake_options: '-DCMAKE_CUDA_FLAGS=-lineinfo'}
     # clang-tidy
@@ -348,6 +351,8 @@ workflows:
     # Clang21+CTK12.9 is currently only used for cuda-clang testing. nvcc 12.9 doesn't support clang21.
     - {jobs: ['dc_ext'], ctk: [        '12.X',         '13.X'], cxx: ['clang21']}
     - {jobs: ['dc_ext'], ctk: [                        '13.X'], cxx: ['gcc15']}
+    # Clang22+CTK12.9 is currently only used for clang-cuda testing. nvcc 12.9 doesn't support clang22.
+    - {jobs: ['dc_ext'], ctk: [        '12.X'                ], cxx: ['clang22']}
     # 12.0 python image, pinned at gcc13 for simplicity. CTK 12.0 doesn't really play nice with gcc13, but
     # that doesn't matter for running python tests.
     - {jobs: ['dc'], ctk: ['12.0'], cxx: 'gcc13'}
@@ -384,7 +389,7 @@ all_stds: [17, 20]
 # - pybuild: Selects image to use for python wheel builds' outer docker instance
 ctk_versions:
   12.0: { stds: [17, 20] }
-  12.9: { stds: [17, 20], alias: ['12.X', 'pybuild', 'clang-cuda'] }
+  12.9: { stds: [17, 20], alias: ['12.X', 'pybuild', 'clang-cuda', 'clang-cuda-next'] }
   13.0: { stds: [17, 20], alias: ['nvhpc-prev'] }
   13.1: { stds: [17, 20], alias: ['nvhpc']}
   13.2: { stds: [17, 20], alias: ['13.X'] }
@@ -425,6 +430,7 @@ host_compilers:
       19: { stds: [17, 20] }
       20: { stds: [17, 20] }
       21: { stds: [17, 20], alias: 'cuda' }
+      22: { stds: [17, 20], alias: 'cuda-next' }
   msvc:
     name: 'MSVC'
     container_tag: 'cl'
