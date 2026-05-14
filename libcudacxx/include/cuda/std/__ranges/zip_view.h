@@ -311,7 +311,7 @@ public:
 };
 
 template <class... _Ranges>
-_CCCL_HOST_DEVICE zip_view(_Ranges&&...) -> zip_view<::cuda::std::ranges::views::all_t<_Ranges>...>;
+_CCCL_DEDUCTION_GUIDE_ATTRIBUTES zip_view(_Ranges&&...) -> zip_view<::cuda::std::ranges::views::all_t<_Ranges>...>;
 
 template <bool _Const, class... _Views>
 class __zip_sentinel
@@ -446,7 +446,7 @@ struct __fn
     noexcept(noexcept(zip_view<all_t<_Ranges&&>...>{::cuda::std::forward<_Ranges>(__rs)...}))
       -> decltype(zip_view<all_t<_Ranges&&>...>(::cuda::std::forward<_Ranges>(__rs)...))
   {
-    return /*------*/ zip_view<all_t<_Ranges>...>{::cuda::std::forward<_Ranges>(__rs)...};
+    return zip_view<all_t<_Ranges&&>...>{::cuda::std::forward<_Ranges>(__rs)...};
   }
 };
 
@@ -456,6 +456,7 @@ inline namespace __cpo
 {
 _CCCL_GLOBAL_CONSTANT auto zip = __zip::__fn{};
 } // namespace __cpo
+
 _CCCL_END_NAMESPACE_CUDA_STD_VIEWS
 
 #include <cuda/std/__cccl/epilogue.h>
