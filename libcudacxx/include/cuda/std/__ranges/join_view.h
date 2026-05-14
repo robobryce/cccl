@@ -526,7 +526,7 @@ public:
 _CCCL_DIAG_POP
 
 template <class _Range>
-_CCCL_HOST_DEVICE explicit join_view(_Range&&) -> join_view<::cuda::std::ranges::views::all_t<_Range>>;
+_CCCL_DEDUCTION_GUIDE_ATTRIBUTES explicit join_view(_Range&&) -> join_view<::cuda::std::ranges::views::all_t<_Range>>;
 
 _LIBCUDACXX_END_HIDDEN_FRIEND_NAMESPACE(join_view)
 
@@ -539,10 +539,11 @@ _CCCL_BEGIN_NAMESPACE_CPO(__join_view)
 struct __fn : __range_adaptor_closure<__fn>
 {
   template <class _Range>
-  [[nodiscard]] _CCCL_API constexpr join_view<all_t<_Range&&>> operator()(_Range&& __range) const
-    noexcept(noexcept(/**/ join_view<all_t<_Range&&>>{::cuda::std::forward<_Range>(__range)}))
+  [[nodiscard]] _CCCL_API constexpr auto operator()(_Range&& __range) const
+    noexcept(noexcept(join_view<all_t<_Range&&>>{::cuda::std::forward<_Range>(__range)}))
+      -> decltype(join_view<all_t<_Range&&>>{::cuda::std::forward<_Range>(__range)})
   {
-    return /*-----------*/ join_view<all_t<_Range&&>>{::cuda::std::forward<_Range>(__range)};
+    return join_view<all_t<_Range&&>>{::cuda::std::forward<_Range>(__range)};
   }
 };
 
