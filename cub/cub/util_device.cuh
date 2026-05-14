@@ -780,7 +780,15 @@ public:
     // __CUDA_ARCH_LIST__ is available from CTK 11.5 onwards and contains values like 860
     // NV_TARGET_SM_INTEGER_LIST is defined by NVHPC and contains values like 86, so we need to scale by 10
 #  ifdef __CUDA_ARCH_LIST__
+#    if _CCCL_CUDA_COMPILER(CLANG, >=, 22)
+    // clang 22+ supports __CUDA_ARCH_LIST__ and also instantiates tuning policies inside kernels, where we rely on
+    // current_tuning_cc(). This returns a zero compute capability during the host pass, which is then passed into the
+    // policy selector. In the rare case that the policy selector is an adapter over a policy hub and invokes
+    // ChainedPolicy, we need to handle a device_ptx_version of 0 here (which comes from the zero compute capability).
+    return runtime_cc_to_compiletime<1, 0, __CUDA_ARCH_LIST__>(device_ptx_version, op);
+#    else // ^^^ _CCCL_CUDA_COMPILER(CLANG, >=, 22) ^^^ / vvv !_CCCL_CUDA_COMPILER(CLANG, >=, 22) vvv
     return runtime_cc_to_compiletime<1, __CUDA_ARCH_LIST__>(device_ptx_version, op);
+#    endif // ^^^ !_CCCL_CUDA_COMPILER(CLANG, >=, 22) ^^^
 #  elif defined(NV_TARGET_SM_INTEGER_LIST)
     return runtime_cc_to_compiletime<10, NV_TARGET_SM_INTEGER_LIST>(device_ptx_version, op);
 #  else
