@@ -29,6 +29,7 @@ Checks:
   - '-modernize-return-braced-init-list'
   - '-modernize-use-auto'
   - 'clang-diagnostic-*'
+  - 'bugprone-*'
   # END REMOVE ME
   # TODO(jfaibussowit):
   #
