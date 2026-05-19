@@ -46,6 +46,9 @@ class less_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+  less_comparable_t() = default;
+  friend CustomType;
+
 public:
   friend __host__ __device__ bool operator<(const CustomType& lhs, const CustomType& rhs)
   {
@@ -59,6 +62,9 @@ class greater_comparable_t
   // The CUDA compiler follows the IA64 ABI for class layout, while the
   // Microsoft host compiler does not.
   char workaround_msvc{};
+
+  greater_comparable_t() = default;
+  friend CustomType;
 
 public:
   friend __host__ __device__ bool operator>(const CustomType& lhs, const CustomType& rhs)
@@ -74,6 +80,9 @@ class lexicographical_less_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+  lexicographical_less_comparable_t() = default;
+  friend CustomType;
+
 public:
   friend __host__ __device__ bool operator<(const CustomType& lhs, const CustomType& rhs)
   {
@@ -88,6 +97,9 @@ class lexicographical_greater_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+  lexicographical_greater_comparable_t() = default;
+  friend CustomType;
+
 public:
   friend __host__ __device__ bool operator>(const CustomType& lhs, const CustomType& rhs)
   {
@@ -101,6 +113,9 @@ class equal_comparable_t
   // The CUDA compiler follows the IA64 ABI for class layout, while the
   // Microsoft host compiler does not.
   char workaround_msvc{};
+
+  equal_comparable_t() = default;
+  friend CustomType;
 
 public:
   friend __host__ __device__ bool operator==(const CustomType& lhs, const CustomType& rhs)
@@ -121,6 +136,9 @@ class subtractable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+  subtractable_t() = default;
+  friend CustomType;
+
 public:
   friend __host__ __device__ CustomType operator-(const CustomType& lhs, const CustomType& rhs)
   {
@@ -139,6 +157,9 @@ class accumulateable_t
   // The CUDA compiler follows the IA64 ABI for class layout, while the
   // Microsoft host compiler does not.
   char workaround_msvc{};
+
+  accumulateable_t() = default;
+  friend CustomType;
 
 public:
   friend __host__ __device__ CustomType operator+(const CustomType& lhs, const CustomType& rhs)
