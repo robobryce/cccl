@@ -212,7 +212,8 @@ public:
             enable_if_t<__is_tuple_of_iterator_references_v<_TupleOfIteratorReferences>, int> = 0,
             // NOLINTEND(modernize-type-traits)
             enable_if_t<(tuple_size<_TupleOfIteratorReferences>::value == sizeof...(_Tp)), int> = 0>
-  _CCCL_API constexpr tuple(_TupleOfIteratorReferences&& __t)
+  _CCCL_API constexpr tuple( // NOLINT(bugprone-forwarding-reference-overload)
+    _TupleOfIteratorReferences&& __t)
       : tuple(::cuda::std::forward<_TupleOfIteratorReferences>(__t), __make_tuple_indices_t<sizeof...(_Tp)>{})
   {}
 
@@ -234,7 +235,8 @@ public:
             // clang-tidy is confused. We are already using _v here
             enable_if_t<!is_lvalue_reference_v<_Tuple>, int>         = 0, // NOLINT(modernize-type-traits)
             enable_if_t<_Constraints::__implicit_constructible, int> = 0>
-  _CCCL_API constexpr tuple(_Tuple&& __t) noexcept(is_nothrow_constructible_v<_BaseT, _Tuple>)
+  _CCCL_API constexpr tuple( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tuple&& __t) noexcept(is_nothrow_constructible_v<_BaseT, _Tuple>)
       : __base_(::cuda::std::forward<_Tuple>(__t))
   {}
 
@@ -251,7 +253,8 @@ public:
             enable_if_t<!__expands_to_this_tuple<_Tuple>::value, int> = 0,
             enable_if_t<!is_lvalue_reference_v<_Tuple>, int>          = 0,
             enable_if_t<_Constraints::__explicit_constructible, int>  = 0>
-  _CCCL_API constexpr explicit tuple(_Tuple&& __t) noexcept(is_nothrow_constructible_v<_BaseT, _Tuple>)
+  _CCCL_API constexpr explicit tuple( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tuple&& __t) noexcept(is_nothrow_constructible_v<_BaseT, _Tuple>)
       : __base_(::cuda::std::forward<_Tuple>(__t))
   {}
 

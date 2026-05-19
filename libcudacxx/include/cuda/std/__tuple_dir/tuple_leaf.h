@@ -139,7 +139,8 @@ public:
 
   _CCCL_EXEC_CHECK_DISABLE
   template <class _Tp, enable_if_t<__tuple_leaf_can_forward<_Tp, _Hp, __tuple_leaf>, int> = 0>
-  _CCCL_API constexpr explicit __tuple_leaf(_Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
+  _CCCL_API constexpr explicit __tuple_leaf( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
       : __value_(::cuda::std::forward<_Tp>(__t))
   {}
 
@@ -207,7 +208,8 @@ public:
 
   _CCCL_EXEC_CHECK_DISABLE
   template <class _Tp, enable_if_t<__tuple_leaf_can_forward<_Tp, _Hp, __tuple_leaf>, int> = 0>
-  _CCCL_API constexpr explicit __tuple_leaf(_Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
+  _CCCL_API constexpr explicit __tuple_leaf( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
       : __value_(::cuda::std::forward<_Tp>(__t))
   {
     static_assert(__can_bind_reference<_Tp&&>,
@@ -308,7 +310,8 @@ public:
 
   _CCCL_EXEC_CHECK_DISABLE
   template <class _Tp, enable_if_t<__tuple_leaf_can_forward<_Tp, _Hp, __tuple_leaf>, int> = 0>
-  _CCCL_API constexpr explicit __tuple_leaf(_Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
+  _CCCL_API constexpr explicit __tuple_leaf( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tp&& __t) noexcept(is_nothrow_constructible_v<_Hp, _Tp>)
       : _Hp(::cuda::std::forward<_Tp>(__t))
   {}
 
@@ -421,7 +424,8 @@ struct _CCCL_DECLSPEC_EMPTY_BASES __tuple_impl<__tuple_indices<_Indx...>, _Tp...
 
   // cannot use inline variable here
   template <class _Tuple, enable_if_t<__tuple_constructible_struct<_Tuple, __tuple_types<_Tp...>>::value, int> = 0>
-  _CCCL_API constexpr __tuple_impl(_Tuple&& __t) noexcept(__tuple_nothrow_constructible<_Tuple, __tuple_types<_Tp...>>)
+  _CCCL_API constexpr __tuple_impl( // NOLINT(bugprone-forwarding-reference-overload)
+    _Tuple&& __t) noexcept(__tuple_nothrow_constructible<_Tuple, __tuple_types<_Tp...>>)
       : __tuple_leaf<_Indx, _Tp>(::cuda::std::forward<__tuple_elem_at<_Tuple, _Indx>>(::cuda::std::get<_Indx>(__t)))...
   {}
 
