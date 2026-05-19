@@ -62,13 +62,13 @@ static __global__ void test_int_special_values_kernel()
 {
   {
     auto [high, low] = cub::detail::split_integer(0xAABBCCDD);
-    assert(high = 0xAABB);
-    assert(low = 0xCCDD);
+    assert(high == 0xAABB);
+    assert(low == 0xCCDD);
   }
   {
     auto [high, low] = cub::detail::split_integer(0xAABBCCDDEEFF1234);
-    assert(high = 0xAABBCCDD);
-    assert(low = 0xEEFF1234);
+    assert(high == 0xAABBCCDD);
+    assert(low == 0xEEFF1234);
   }
 }
 
