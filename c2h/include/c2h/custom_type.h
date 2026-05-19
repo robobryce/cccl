@@ -46,6 +46,7 @@ class less_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   less_comparable_t() = default;
   friend CustomType;
 
@@ -63,6 +64,7 @@ class greater_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   greater_comparable_t() = default;
   friend CustomType;
 
@@ -80,6 +82,7 @@ class lexicographical_less_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   lexicographical_less_comparable_t() = default;
   friend CustomType;
 
@@ -97,6 +100,7 @@ class lexicographical_greater_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   lexicographical_greater_comparable_t() = default;
   friend CustomType;
 
@@ -114,6 +118,7 @@ class equal_comparable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   equal_comparable_t() = default;
   friend CustomType;
 
@@ -136,6 +141,7 @@ class subtractable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   subtractable_t() = default;
   friend CustomType;
 
@@ -158,6 +164,7 @@ class accumulateable_t
   // Microsoft host compiler does not.
   char workaround_msvc{};
 
+protected:
   accumulateable_t() = default;
   friend CustomType;
 
