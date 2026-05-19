@@ -190,6 +190,8 @@ template <class _Tp>
     return __cccl_nvfp_manip_helper<_Tp>{__v}.__x;
   }
 #endif // _CCCL_HAS_NVBF16()
+  // Distinct extended floating-point types expose the same storage member.
+  // NOLINTBEGIN(bugprone-branch-clone)
 #if _CCCL_HAS_NVFP8_E4M3()
   else if constexpr (is_same_v<_Tp, __nv_fp8_e4m3>)
   {
@@ -226,6 +228,7 @@ template <class _Tp>
     return __v.__x;
   }
 #endif // _CCCL_HAS_NVFP4_E2M1()
+  // NOLINTEND(bugprone-branch-clone)
   else
   {
     static_assert(__always_false_v<_Tp>, "Unsupported floating point format");

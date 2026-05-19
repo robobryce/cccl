@@ -1067,6 +1067,8 @@ __launch_bounds__(get_threads_per_block<PolicySelector>) _CCCL_KERNEL_ATTRIBUTES
       ::cuda::std::move(out),
       ::cuda::std::move(ins.iterator)...);
   }
+  // The async-copy branches use different SM targets and kernels, but can look identical after target preprocessing.
+  // NOLINTBEGIN(bugprone-branch-clone)
   else if constexpr (policy.algorithm == Algorithm::memcpy_async)
   {
     NV_IF_TARGET(
@@ -1093,6 +1095,7 @@ __launch_bounds__(get_threads_per_block<PolicySelector>) _CCCL_KERNEL_ATTRIBUTES
          ::cuda::std::move(out),
          ::cuda::std::move(ins.aligned_ptr)...);));
   }
+  // NOLINTEND(bugprone-branch-clone)
   else
   {
     static_assert(!sizeof(Offset), "Algorithm not implemented");
