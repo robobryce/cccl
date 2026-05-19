@@ -208,8 +208,9 @@ public:
   struct TempStorage : Uninitialized<_TempStorage>
   {};
 
-private:
   BlockMergeSortStrategy() = delete;
+
+private:
   explicit _CCCL_DEVICE _CCCL_FORCEINLINE BlockMergeSortStrategy(unsigned int linear_tid)
       : temp_storage(PrivateStorage())
       , linear_tid(linear_tid)
