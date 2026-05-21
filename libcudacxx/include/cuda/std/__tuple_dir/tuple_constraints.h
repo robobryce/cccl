@@ -52,6 +52,7 @@
 #include <cuda/std/__type_traits/lazy.h>
 #include <cuda/std/__type_traits/remove_cvref.h>
 #include <cuda/std/__type_traits/remove_reference.h>
+#include <cuda/std/__utility/declval.h>
 
 #include <cuda/std/__cccl/prologue.h>
 
@@ -195,6 +196,10 @@ struct __tuple_constraints
   template <int = 0>
   [[nodiscard]] static _CCCL_API _CCCL_CONSTEVAL auto __check_default_constructible() noexcept
   {
+    if constexpr (sizeof...(_Types) == 0)
+    { // This is required to disambiguate CTAD for an empty tuple:
+      return _TupleConstructorTraits<true, false, true>{};
+    }
     if constexpr ((is_default_constructible_v<_Types> && ...))
     { // [tuple.cnstr]-6: is_default_constructible_v<Types> is true for all i.
       constexpr bool __is_implicit = (__is_implicitly_default_constructible<_Types>::value && ...);
