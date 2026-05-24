@@ -56,8 +56,13 @@ CUB_NAMESPACE_BEGIN
 
 namespace detail::histogram
 {
-// Maximum number of bins per channel for which we will use a privatized smem strategy
-static constexpr int max_privatized_smem_bins = 256;
+// Maximum number of bins per channel for which we will use a privatized smem strategy.
+// On modern GPUs (sm_90+) the per-block SMEM budget is large enough to hold thousands of
+// 4-byte counters per active channel, and SMEM atomics are dramatically faster than the
+// L2-resident GMEM atomics that would otherwise be used for medium-sized histograms.
+// 2048 keeps single-channel medium-bin workloads in SMEM (8 KiB) and stays within budget
+// even for 3-active-channel multi-histogram (24 KiB).
+static constexpr int max_privatized_smem_bins = 2048;
 
 template <int NUM_CHANNELS,
           int NUM_ACTIVE_CHANNELS,
