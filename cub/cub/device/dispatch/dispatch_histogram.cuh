@@ -261,6 +261,48 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   // Get device occupancy for sweep_kernel
   int histogram_sweep_occupancy = histogram_sweep_sm_occupancy * sm_count;
 
+  // L2-fit cap for the GMEM-privatized path (PRIVATIZED_SMEM_BINS == 0).
+  // When the per-block GMEM-privatized histograms collectively exceed the L2 cache,
+  // every atomicAdd to a privatized counter risks a DRAM round-trip instead of an
+  // L2 hit. Capping the active block count so the working set fits in ~half of L2
+  // (leaving room for the streaming input and output) recovers L2-resident atomics.
+  // Only applied for the IsEven and single-channel paths, where the privatized bin
+  // count is well-behaved (output bin count for Even, 1 channel for the
+  // single-channel range path).
+  if constexpr (PRIVATIZED_SMEM_BINS == 0)
+  {
+    int l2_cache_size = 0;
+    int device_ordinal_l2 = 0;
+    cudaError_t l2_error = cudaGetDevice(&device_ordinal_l2);
+    if (l2_error == cudaSuccess)
+    {
+      l2_error = cudaDeviceGetAttribute(&l2_cache_size, cudaDevAttrL2CacheSize, device_ordinal_l2);
+    }
+    if (l2_error == cudaSuccess && l2_cache_size > 0)
+    {
+      // Compute per-block GMEM-privatized footprint across all active channels.
+      ::cuda::std::size_t per_block_bytes = 0;
+      for (int CHANNEL = 0; CHANNEL < NUM_ACTIVE_CHANNELS; ++CHANNEL)
+      {
+        per_block_bytes += static_cast<::cuda::std::size_t>(num_privatized_levels[CHANNEL] - 1)
+                         * kernel_source.CounterSize();
+      }
+      if (per_block_bytes > 0)
+      {
+        const ::cuda::std::size_t l2_half = static_cast<::cuda::std::size_t>(l2_cache_size) / 2u;
+        const ::cuda::std::size_t l2_block_budget_sz = l2_half / per_block_bytes;
+        const int l2_block_budget = (l2_block_budget_sz > static_cast<::cuda::std::size_t>(::cuda::std::numeric_limits<int>::max()))
+                                    ? ::cuda::std::numeric_limits<int>::max()
+                                    : static_cast<int>(l2_block_budget_sz);
+        // Floor at sm_count: never go below 1 block per SM, otherwise SM-level
+        // parallelism collapses faster than the L2-fit gains can recoup.
+        const int min_block_floor = sm_count;
+        const int l2_capped       = ::cuda::std::max(l2_block_budget, min_block_floor);
+        histogram_sweep_occupancy = ::cuda::std::min(histogram_sweep_occupancy, l2_capped);
+      }
+    }
+  }
+
   if (num_row_pixels * NUM_CHANNELS == row_stride_samples)
   {
     // Treat as a single linear array of samples
