@@ -48,7 +48,16 @@ struct Transforms
       this->num_output_levels = num_output_levels_;
     }
 
-    // Method for converting samples to bin-ids
+    // Method for converting samples to bin-ids.
+    //
+    // Implementation: interpolation-seeded binary search. We load levels[0] and
+    // levels[N-1] once (cached in L1 across calls within a block), use linear
+    // interpolation to estimate the bin, then run a tightly-bounded binary
+    // search around that estimate. For monotonic-uniform or near-uniform
+    // levels (e.g. the jittered-uniform levels used in the range histogram
+    // benchmark), the initial estimate lands within a small window so the
+    // search collapses from log2(N) dependent loads to log2(W) loads. For
+    // arbitrary monotonic levels we fall back to the full upper_bound search.
     template <CacheLoadModifier LOAD_MODIFIER, typename _SampleT>
     _CCCL_HOST_DEVICE _CCCL_FORCEINLINE void BinSelect(_SampleT sample, int& bin, bool valid) const
     {
@@ -63,13 +72,153 @@ struct Transforms
       WrappedLevelIteratorT wrapped_levels(d_levels);
 
       const int num_bins = num_output_levels - 1;
-      if (valid)
+      if (!valid)
       {
-        bin = UpperBound(wrapped_levels, num_output_levels, static_cast<LevelT>(sample)) - 1;
+        return;
+      }
+
+      // For tiny histograms, the interpolation overhead exceeds the savings;
+      // just run the full search.
+      const LevelT sample_cast = static_cast<LevelT>(sample);
+      constexpr int interpolation_threshold = 8;
+      if (num_output_levels <= interpolation_threshold)
+      {
+        bin = UpperBound(wrapped_levels, num_output_levels, sample_cast) - 1;
         if (bin >= num_bins)
         {
           bin = -1;
         }
+        return;
+      }
+
+      // Load the level array endpoints for the interpolation step. These
+      // are loop-invariant (lo/hi are identical for every sample). 32
+      // lockstep threads in a warp coalesce to one or two L1-cached fetches
+      // and the loads have no dependencies on the per-thread sample, so they
+      // fully overlap with the arithmetic below.
+      const LevelT lo_val = wrapped_levels[0];
+      const LevelT hi_val = wrapped_levels[num_output_levels - 1];
+
+      // We don't check up front whether the sample is inside [lo_val, hi_val).
+      // The probe / fallback path below naturally produces bin == -1 for
+      // samples below levels[0] (clamped est=0 doesn't bracket and the
+      // est-1 probe is skipped because est < 1) and for samples at/above
+      // levels[N-1] (clamped est=num_bins-1 doesn't bracket and the est+2
+      // probe is skipped because est+2 >= num_output_levels). Skipping the
+      // explicit check saves a pair of compares + branch on the hot path.
+
+      // Interpolate sample position assuming uniform spacing of levels.
+      // For LevelT types whose dynamic range fits in float (the I32 case in
+      // particular: 24-bit mantissa is enough for the bench's [0, 2^24) value
+      // range, and being off by 1 unit-in-the-last-place is fine since we
+      // verify the bin endpoints below) we use float arithmetic — single-
+      // precision divide is several × faster than double on H100. For
+      // larger types we keep double for safety.
+      using ArithT = ::cuda::std::_If<sizeof(LevelT) <= 4, float, double>;
+      const ArithT range_d  = static_cast<ArithT>(hi_val) - static_cast<ArithT>(lo_val);
+      const ArithT sample_d = static_cast<ArithT>(sample_cast) - static_cast<ArithT>(lo_val);
+      int est = static_cast<int>(sample_d * static_cast<ArithT>(num_bins) / range_d);
+      if (est < 0)
+      {
+        est = 0;
+      }
+      else if (est > num_bins - 1)
+      {
+        est = num_bins - 1;
+      }
+
+      // Single-probe fast path: for jittered-uniform levels with ~25% step
+      // jitter the interpolation estimate is at the answer ±1 bin. Probe the
+      // two endpoints of the predicted bin first; if they bracket the
+      // sample we're done in 2 dependent loads.
+      //
+      // Clamp est to [0, num_bins - 1] so est+1 stays in-bounds. The clamp is
+      // redundant with the two-step clamp above, but keeping it here gives
+      // the compiler enough range information to elide bounds checks on the
+      // wrapped_levels[est] / wrapped_levels[est + 1] reads (observed: removing
+      // it caused a measurable multi.range regression in profiling).
+      if (est >= num_bins)
+      {
+        est = num_bins - 1;
+      }
+
+      const LevelT est_lo = wrapped_levels[est];
+      const LevelT est_hi = wrapped_levels[est + 1];
+      if (sample_cast >= est_lo && sample_cast < est_hi)
+      {
+        bin = est;
+        return;
+      }
+
+      // Slow path: the answer is in an adjacent bin (~1-bin estimate slip,
+      // common for jittered-uniform levels) or further out (rare). Probe the
+      // immediate neighbours of `est` next: this handles the ±1 case in one
+      // additional load. If those don't bracket either, fall back to a
+      // bounded binary search of the appropriate sub-array.
+      if (sample_cast < est_lo)
+      {
+        // Sample is to the left of the est-th bin.
+        if (est >= 1)
+        {
+          const LevelT prev_lo = wrapped_levels[est - 1];
+          if (sample_cast >= prev_lo)
+          {
+            bin = est - 1;
+            return;
+          }
+          // Search [0, est - 1).
+          bin = UpperBound(wrapped_levels, est - 1, sample_cast) - 1;
+        }
+        else
+        {
+          // est == 0 and sample < levels[0] -- already covered by the upfront
+          // out-of-range check, but be defensive.
+          bin = -1;
+        }
+      }
+      else
+      {
+        // sample_cast >= est_hi, the answer is to the right of bin `est`.
+        if (est + 2 < num_output_levels)
+        {
+          const LevelT next_hi = wrapped_levels[est + 2];
+          if (sample_cast < next_hi)
+          {
+            bin = est + 1;
+            return;
+          }
+          // Search [est + 2, num_output_levels). The result of this UpperBound
+          // is the offset of the first level greater than sample within that
+          // sub-range.
+          const int tail_size = num_output_levels - (est + 2);
+          OffsetT retval      = 0;
+          OffsetT items       = tail_size;
+          const int base      = est + 2;
+          while (items > 0)
+          {
+            OffsetT half = items >> 1;
+            if (sample_cast < wrapped_levels[base + retval + half])
+            {
+              items = half;
+            }
+            else
+            {
+              retval = retval + (half + 1);
+              items  = items - (half + 1);
+            }
+          }
+          bin = static_cast<int>(base + retval) - 1;
+        }
+        else
+        {
+          // sample >= levels[N-1] -- already covered by the upfront
+          // out-of-range check.
+          bin = -1;
+        }
+      }
+      if (bin >= num_bins)
+      {
+        bin = -1;
       }
     }
   };

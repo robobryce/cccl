@@ -269,6 +269,22 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
     row_stride_samples = num_row_pixels * NUM_CHANNELS;
   }
 
+  // For the GMEM-privatized path with very-large bin counts (>=512K), cap the
+  // grid at approximately sm_count blocks. The workspace and StoreOutput merge
+  // cost grow linearly with num_thread_blocks * num_bins; over-subscribing the
+  // SM count multiplies that cost without proportionally improving sweep
+  // throughput because the bottleneck is GMEM bandwidth, not compute. Capping
+  // at sm_count reduces both the per-trial GMEM allocation (saving multi-GB
+  // for 2M-bin cases) and the post-sweep merge. Smaller large-bin cases (60K,
+  // 16K) still get the full occupancy-driven grid because the per-block
+  // privatized histograms are small (<=240KB) and the merge cost is bounded.
+  constexpr int large_bin_cap_threshold = 524288;
+  if (PRIVATIZED_SMEM_BINS == 0 && num_privatized_levels[0] - 1 >= large_bin_cap_threshold)
+  {
+    histogram_sweep_occupancy =
+      ::cuda::std::min(histogram_sweep_occupancy, sm_count);
+  }
+
   // Get grid dimensions, trying to keep total blocks ~histogram_sweep_occupancy
   int pixels_per_tile = threads_per_block * pixels_per_thread;
   int tiles_per_row   = static_cast<int>(::cuda::ceil_div(num_row_pixels, pixels_per_tile));
