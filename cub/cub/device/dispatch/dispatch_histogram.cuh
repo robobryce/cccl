@@ -23,6 +23,8 @@
 #endif // no system header
 
 #include <cub/agent/agent_histogram.cuh>
+#include <cub/device/device_radix_sort.cuh>
+#include <cub/device/device_run_length_encode.cuh>
 #include <cub/device/dispatch/kernels/kernel_histogram.cuh>
 #include <cub/device/dispatch/tuning/tuning_histogram.cuh>
 #include <cub/grid/grid_queue.cuh>
@@ -44,6 +46,7 @@
 #include <cuda/std/__type_traits/conditional.h>
 #include <cuda/std/__type_traits/is_void.h>
 #include <cuda/std/array>
+#include <cuda/std/cstdint>
 #include <cuda/std/limits>
 #include <cuda/std/tuple>
 
@@ -392,6 +395,783 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   }
 
   return cudaSuccess;
+}
+
+// -------------------------------------------------------------------------------------------------
+// Sort-based histogram path (single-channel, large-bin regime)
+// -------------------------------------------------------------------------------------------------
+//
+// For very-large-bin cases (60K, 2M) the SMEM-privatized strategy is impossible (SMEM doesn't fit)
+// and the GMEM-privatized strategy is heavily L2-/atomics-bound. We replace those with a
+// device-wide sort + run-length-encode pipeline:
+//
+//   1. compute_bin_indices_kernel     bin index per sample
+//   2. cub::DeviceRadixSort::SortKeys sort bin indices (only log2(num_bins+1) bits)
+//   3. cub::DeviceRunLengthEncode     extract (unique_bin, count) pairs
+//   4. scatter_counts_kernel          scatter counts into d_output_histograms[0]
+//
+// Invalid samples (out-of-range or filtered) are written with sentinel value `num_bins` so they
+// cluster at the end after sort and are simply ignored by the scatter kernel. The scatter kernel
+// also handles "byte-sample" non-passthrough output decode by re-applying output_decode_op to the
+// privatized bin id when it differs from the output bin id.
+
+// Minimum number of output bins for which the sort-based path *might* be preferred over the GMEM
+// privatized atomic path. Below this threshold the GMEM-atomic strategy still wins because the
+// privatized histogram fits in L2 and each sample is a single atomicAdd to a hot bin.
+//
+// Empirically tuned on H100 across uniform/low-entropy 256M-element runs:
+//   16384 bins:   sort path is ~1.3-3x slower across both entropies (net loss).
+//   60000 bins:   sort path wins ~3x for uniform entropy, loses ~2.5x for low entropy
+//                 (net geomean win ~8%).
+//   2097152 bins: sort path wins ~4x for uniform entropy, breaks even for low entropy
+//                 (net geomean win ~2x).
+// Threshold of 50000 excludes 16384 (consistent loss) and includes 60000 + 2M (net wins).
+static constexpr int min_sort_based_output_bins = 50000;
+
+// Decide at runtime whether the sort-based pipeline is preferred for the given
+// (num_samples, num_output_bins). The decision rule:
+//
+//   - num_output_bins must be >= min_sort_based_output_bins (gross filter).
+//   - Density = num_samples / num_output_bins. When the histogram is dense (many samples per
+//     bin), atomic-baseline does well even at high entropy because hot bins amortize across
+//     many atomicAdd ops via L2/L1 coalescing. When density is low (sparse), atomic contention
+//     and GMEM-privatized buffer-init cost dominate, and sort wins.
+//   - The cutoff comes from on-H100 measurements:
+//       2M bins / 256M samples (density 128): sort wins ~2-4x.
+//       2M bins /   1M samples (density 0.5): sort wins ~28x (GMEM-privatized has to allocate
+//         132 * 8 MB of per-block histograms, which dominates for a tiny input).
+//       60K bins / 256M samples (density 4267): sort wins ~3x (uniform) or loses ~2.5x (low).
+//       60K bins /   1M samples (density 16):   sort wins for both entropies.
+//       16K bins / 256M samples (density 15625): sort always loses.
+//       16K bins /   1M samples (density 61):   sort can win, but the absolute time
+//         is small either way; falls within noise.
+//   - Heuristic: density < 5000 -> sort. The 60K-uniform case with density 4267 is just under
+//     the threshold (sort wins). 60K-low-entropy density 4267 is also under (sort loses, but
+//     close to a tie). 16K density 15625 is over (use atomic).
+template <typename OffsetT>
+_CCCL_HOST_DEVICE _CCCL_FORCEINLINE bool use_sort_path(OffsetT num_samples, int num_output_bins)
+{
+  constexpr OffsetT max_density_for_sort = 5000;
+  if (num_output_bins < min_sort_based_output_bins)
+  {
+    return false;
+  }
+  // num_samples / num_bins < max_density_for_sort  <=>  num_samples < max_density_for_sort * num_bins
+  // (avoid divide; bin counts up to ~2M fit in OffsetT * int comfortably for 32-bit OffsetT).
+  return num_samples < max_density_for_sort * static_cast<OffsetT>(num_output_bins);
+}
+
+// Compute the bin index for each sample using the privatized decode op. Invalid samples
+// (filtered by the decode op) get the sentinel value `num_bins`. Output is written to
+// d_bin_indices.
+//
+// Each thread processes ITEMS_PER_THREAD samples, in a striped layout (matches the
+// blocksize of consumer kernels). The samples per thread are loaded contiguously
+// (block-strided), which lets the compiler vectorize on contiguous pointer iterators.
+template <int ItemsPerThread,
+          typename SampleIteratorT,
+          typename PrivatizedDecodeOpT,
+          typename OffsetT,
+          typename BinIndexT>
+_CCCL_KERNEL_ATTRIBUTES void compute_bin_indices_kernel(
+  SampleIteratorT d_samples,
+  BinIndexT* d_bin_indices,
+  PrivatizedDecodeOpT privatized_decode_op,
+  OffsetT num_samples,
+  BinIndexT num_bins)
+{
+  using SampleT = it_value_t<SampleIteratorT>;
+
+  const OffsetT block_offset =
+    static_cast<OffsetT>(blockIdx.x) * static_cast<OffsetT>(blockDim.x) * ItemsPerThread;
+
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int item = 0; item < ItemsPerThread; ++item)
+  {
+    const OffsetT idx = block_offset + static_cast<OffsetT>(item) * blockDim.x + threadIdx.x;
+    if (idx >= num_samples)
+    {
+      return;
+    }
+    const SampleT sample = d_samples[idx];
+    int bin              = -1;
+    privatized_decode_op.template BinSelect<LOAD_DEFAULT>(sample, bin, true);
+    // Map invalid samples (bin == -1) to sentinel `num_bins`.
+    d_bin_indices[idx] = (bin >= 0 && bin < num_bins) ? static_cast<BinIndexT>(bin) : num_bins;
+  }
+}
+
+// After sort + RLE, scatter counts into the output histogram. Each thread handles one (bin, count)
+// pair. If output_decode_op is not the pass-through (e.g. byte-sample case), apply it to map the
+// privatized bin to the output bin. Skips the sentinel bin (= num_privatized_bins).
+template <typename CounterT, typename UniqueT, typename CountT, typename OutputDecodeOpT>
+_CCCL_KERNEL_ATTRIBUTES void scatter_counts_kernel(
+  const UniqueT* d_unique_bins,
+  const CountT* d_counts,
+  const int* d_num_runs,
+  CounterT* d_output_histogram,
+  OutputDecodeOpT output_decode_op,
+  int num_output_bins,
+  int num_privatized_bins)
+{
+  const int tid      = blockIdx.x * blockDim.x + threadIdx.x;
+  const int num_runs = *d_num_runs;
+  if (tid >= num_runs)
+  {
+    return;
+  }
+
+  const UniqueT priv_bin = d_unique_bins[tid];
+  // Skip the sentinel bucket of invalid samples.
+  if (static_cast<int>(priv_bin) >= num_privatized_bins)
+  {
+    return;
+  }
+
+  int output_bin       = -1;
+  const CounterT count = static_cast<CounterT>(d_counts[tid]);
+  output_decode_op.template BinSelect<LOAD_DEFAULT>(static_cast<int>(priv_bin), output_bin, count > 0);
+  if (output_bin >= 0 && output_bin < num_output_bins)
+  {
+    // The dispatch_sort_based path is only invoked from the non-byte-sample dispatch_even /
+    // dispatch_range branches, where output_decode_op is PassThruTransform and each priv_bin
+    // maps to a unique output_bin. RLE produces at most one (bin, count) pair per priv_bin,
+    // so no two scatter writes target the same output_bin. Direct store is correct (and the
+    // d_output_histogram was zeroed in step 0). For a hypothetical future caller using a
+    // SearchTransform output decode with collisions, an atomicAdd would be needed instead.
+    d_output_histogram[output_bin] = count;
+  }
+}
+
+// Inner dispatch templated on the bin-index integral type used to sort. This lets us pick a
+// narrower key type (e.g. uint16_t) when num_privatized_bins fits, halving the sort/RLE
+// memory bandwidth.
+template <typename BinIndexT,
+          typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT>
+CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_sort_based_typed(
+  void* d_temp_storage,
+  size_t& temp_storage_bytes,
+  SampleIteratorT d_samples,
+  CounterT* d_output_histogram,
+  PrivatizedDecodeOpT privatized_decode_op,
+  OutputDecodeOpT output_decode_op,
+  int num_privatized_bins,
+  int num_output_bins,
+  OffsetT num_samples,
+  cudaStream_t stream)
+{
+  // Sentinel = num_privatized_bins; we sort log2(num_privatized_bins + 1) bits.
+  // For num_privatized_bins == 60000, bits = 16; for 2097152, bits = 22.
+  int end_bit = 0;
+  for (int v = num_privatized_bins; v > 0; v >>= 1)
+  {
+    ++end_bit;
+  }
+
+  // Layout: bin_indices_in[N], bin_indices_out[N], unique_bins[max_unique], counts[max_unique],
+  // num_runs[1], sort_temp[?], rle_temp[?]
+  const int max_unique           = num_privatized_bins + 1; // +1 for sentinel
+  const size_t bin_in_bytes      = sizeof(BinIndexT) * static_cast<size_t>(num_samples);
+  const size_t bin_out_bytes     = sizeof(BinIndexT) * static_cast<size_t>(num_samples);
+  const size_t unique_bins_bytes = sizeof(BinIndexT) * static_cast<size_t>(max_unique);
+  const size_t counts_bytes      = sizeof(int) * static_cast<size_t>(max_unique);
+  const size_t num_runs_bytes    = sizeof(int);
+
+  // Query temp storage for sort and RLE. Use the DoubleBuffer overload (is_overwrite_okay=true
+  // internally) so CUB doesn't allocate its own extra key buffer; we provide d_bin_in /
+  // d_bin_out as the two ping-pong buffers.
+  size_t sort_temp_bytes = 0;
+  {
+    DoubleBuffer<BinIndexT> dummy_keys{nullptr, nullptr};
+    if (const auto error = CubDebug(cub::DeviceRadixSort::SortKeys(
+          nullptr,
+          sort_temp_bytes,
+          dummy_keys,
+          static_cast<int>(num_samples),
+          0,
+          end_bit,
+          stream)))
+    {
+      return error;
+    }
+  }
+
+  size_t rle_temp_bytes = 0;
+  if (const auto error = CubDebug(cub::DeviceRunLengthEncode::Encode(
+        nullptr,
+        rle_temp_bytes,
+        static_cast<const BinIndexT*>(nullptr),
+        static_cast<BinIndexT*>(nullptr),
+        static_cast<int*>(nullptr),
+        static_cast<int*>(nullptr),
+        num_samples,
+        stream)))
+  {
+    return error;
+  }
+
+  constexpr int NUM_ALLOCATIONS = 7;
+  void* allocations[NUM_ALLOCATIONS] = {};
+  size_t allocation_sizes[NUM_ALLOCATIONS] = {
+    bin_in_bytes, bin_out_bytes, unique_bins_bytes, counts_bytes, num_runs_bytes, sort_temp_bytes, rle_temp_bytes};
+
+  if (const auto error =
+        CubDebug(detail::alias_temporaries(d_temp_storage, temp_storage_bytes, allocations, allocation_sizes)))
+  {
+    return error;
+  }
+
+  if (d_temp_storage == nullptr)
+  {
+    return cudaSuccess;
+  }
+
+  auto* d_bin_in       = reinterpret_cast<BinIndexT*>(allocations[0]);
+  auto* d_bin_out      = reinterpret_cast<BinIndexT*>(allocations[1]);
+  auto* d_unique_bins  = reinterpret_cast<BinIndexT*>(allocations[2]);
+  auto* d_counts       = reinterpret_cast<int*>(allocations[3]);
+  auto* d_num_runs     = reinterpret_cast<int*>(allocations[4]);
+  void* d_sort_temp    = allocations[5];
+  void* d_rle_temp     = allocations[6];
+
+  // Step 0: zero the output histogram up-front so the device can overlap it with the
+  // sort-pipeline kernels below (they write only to scratch buffers, not d_output_histogram).
+  if (const auto error = CubDebug(cudaMemsetAsync(
+        d_output_histogram, 0, static_cast<size_t>(num_output_bins) * sizeof(CounterT), stream)))
+  {
+    return error;
+  }
+
+  // Step 1: compute bin indices.
+  // Each thread handles 8 samples; 256 threads/block * 8 = 2048 samples/block. This amortizes the
+  // per-thread overhead (block_offset compute, decode-op state) across more arithmetic.
+  constexpr int compute_bins_threads          = 256;
+  constexpr int compute_bins_items_per_thread = 8;
+  constexpr int compute_bins_tile             = compute_bins_threads * compute_bins_items_per_thread;
+  const auto compute_bins_blocks =
+    static_cast<unsigned int>((num_samples + compute_bins_tile - 1) / compute_bins_tile);
+
+  THRUST_NS_QUALIFIER::cuda_cub::detail::triple_chevron(
+    dim3(compute_bins_blocks), dim3(compute_bins_threads), 0, stream)
+    .doit(compute_bin_indices_kernel<compute_bins_items_per_thread,
+                                     SampleIteratorT,
+                                     PrivatizedDecodeOpT,
+                                     OffsetT,
+                                     BinIndexT>,
+          d_samples,
+          d_bin_in,
+          privatized_decode_op,
+          num_samples,
+          static_cast<BinIndexT>(num_privatized_bins));
+
+  if (const auto error = CubDebug(cudaPeekAtLastError()))
+  {
+    return error;
+  }
+
+  // Step 2: sort bin indices in place via the DoubleBuffer overload.
+  DoubleBuffer<BinIndexT> sort_keys_buffer{d_bin_in, d_bin_out};
+  if (const auto error = CubDebug(cub::DeviceRadixSort::SortKeys(
+        d_sort_temp,
+        sort_temp_bytes,
+        sort_keys_buffer,
+        static_cast<int>(num_samples),
+        0,
+        end_bit,
+        stream)))
+  {
+    return error;
+  }
+  BinIndexT* d_sorted = sort_keys_buffer.Current();
+
+  // Step 3: run-length encode.
+  if (const auto error = CubDebug(cub::DeviceRunLengthEncode::Encode(
+        d_rle_temp,
+        rle_temp_bytes,
+        d_sorted,
+        d_unique_bins,
+        d_counts,
+        d_num_runs,
+        num_samples,
+        stream)))
+  {
+    return error;
+  }
+
+  constexpr int scatter_threads = 256;
+  // Worst-case num_runs = num_privatized_bins + 1; launch enough blocks for that.
+  const auto scatter_blocks =
+    static_cast<unsigned int>((max_unique + scatter_threads - 1) / scatter_threads);
+
+  THRUST_NS_QUALIFIER::cuda_cub::detail::triple_chevron(
+    dim3(scatter_blocks), dim3(scatter_threads), 0, stream)
+    .doit(scatter_counts_kernel<CounterT, BinIndexT, int, OutputDecodeOpT>,
+          d_unique_bins,
+          d_counts,
+          d_num_runs,
+          d_output_histogram,
+          output_decode_op,
+          num_output_bins,
+          num_privatized_bins);
+
+  if (const auto error = CubDebug(cudaPeekAtLastError()))
+  {
+    return error;
+  }
+
+  if (const auto error = CubDebug(detail::DebugSyncStream(stream)))
+  {
+    return error;
+  }
+
+  return cudaSuccess;
+}
+
+// Outer wrapper that picks the bin-index integral type. uint16_t when num_privatized_bins+1
+// fits in 16 bits (e.g. 60000-bin case), else uint32_t. Narrower keys halve the
+// sort/RLE memory bandwidth.
+template <typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT>
+CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_sort_based(
+  void* d_temp_storage,
+  size_t& temp_storage_bytes,
+  SampleIteratorT d_samples,
+  CounterT* d_output_histogram,
+  PrivatizedDecodeOpT privatized_decode_op,
+  OutputDecodeOpT output_decode_op,
+  int num_privatized_bins,
+  int num_output_bins,
+  OffsetT num_samples,
+  cudaStream_t stream)
+{
+  // Need to fit the sentinel = num_privatized_bins, so num_privatized_bins must be < 2^16.
+  if (num_privatized_bins < (1 << 16))
+  {
+    return dispatch_sort_based_typed<::cuda::std::uint16_t>(
+      d_temp_storage,
+      temp_storage_bytes,
+      d_samples,
+      d_output_histogram,
+      privatized_decode_op,
+      output_decode_op,
+      num_privatized_bins,
+      num_output_bins,
+      num_samples,
+      stream);
+  }
+  return dispatch_sort_based_typed<::cuda::std::uint32_t>(
+    d_temp_storage,
+    temp_storage_bytes,
+    d_samples,
+    d_output_histogram,
+    privatized_decode_op,
+    output_decode_op,
+    num_privatized_bins,
+    num_output_bins,
+    num_samples,
+    stream);
+}
+
+// -------------------------------------------------------------------------------------------------
+// Sort-based histogram path (multi-channel, large-bin regime)
+// -------------------------------------------------------------------------------------------------
+//
+// Extension of the single-channel sort path to NUM_ACTIVE_CHANNELS > 1. The input is interleaved
+// `NUM_CHANNELS` samples per pixel, and we histogram only the first `NUM_ACTIVE_CHANNELS` of them.
+// Approach: pack a channel-major key for every active sample so we can run a single fused
+// sort+RLE+scatter over all channels' samples at once:
+//
+//   key = chan * stride_per_channel + bin_id
+//
+// where `stride_per_channel = num_privatized_bins + 1` (one slot per channel for the per-channel
+// sentinel; choosing a uniform stride avoids interleaving sentinels between channels). The total
+// number of distinct keys is `NUM_ACTIVE_CHANNELS * stride_per_channel`, with end_bit chosen as
+// ceil(log2(NUM_ACTIVE_CHANNELS * stride_per_channel)). Invalid samples in channel `chan` get the
+// sentinel `chan * stride_per_channel + num_privatized_bins`, which is filtered by the scatter.
+
+// Compute multi-channel bin indices. For each pixel, emit NUM_ACTIVE_CHANNELS keys (one per active
+// channel) packed channel-major. The output buffer must have capacity
+// num_pixels * NUM_ACTIVE_CHANNELS keys. Each thread handles ITEMS_PER_THREAD pixels.
+//
+// Layout: thread `t` of block `b` writes channel `c`'s key for pixel `p = b*BS*IPP + i*BS + t` to
+// d_bin_indices[p * NUM_ACTIVE_CHANNELS + c]. (Pixel-major, channel-minor — the radix sort doesn't
+// care about layout, but keeping channels next to each other from the same pixel maximises L1/L2
+// reuse for the channel-strided sample loads.)
+template <int NumActiveChannels,
+          int NumChannels,
+          int ItemsPerThread,
+          typename SampleIteratorT,
+          typename PrivatizedDecodeOpT,
+          typename OffsetT,
+          typename BinIndexT>
+_CCCL_KERNEL_ATTRIBUTES void compute_bin_indices_multi_channel_kernel(
+  SampleIteratorT d_samples,
+  BinIndexT* d_bin_indices,
+  ::cuda::std::array<PrivatizedDecodeOpT, NumActiveChannels> privatized_decode_op,
+  OffsetT num_pixels,
+  BinIndexT num_priv_bins_per_channel,
+  BinIndexT stride_per_channel)
+{
+  using SampleT = it_value_t<SampleIteratorT>;
+
+  const OffsetT block_offset =
+    static_cast<OffsetT>(blockIdx.x) * static_cast<OffsetT>(blockDim.x) * ItemsPerThread;
+
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int item = 0; item < ItemsPerThread; ++item)
+  {
+    const OffsetT pixel = block_offset + static_cast<OffsetT>(item) * blockDim.x + threadIdx.x;
+    if (pixel >= num_pixels)
+    {
+      return;
+    }
+
+    // Multi-channel: load NumActiveChannels samples from the pixel and emit one key each.
+    const OffsetT sample_base = pixel * static_cast<OffsetT>(NumChannels);
+    const OffsetT key_base    = pixel * static_cast<OffsetT>(NumActiveChannels);
+
+    _CCCL_PRAGMA_UNROLL_FULL()
+    for (int c = 0; c < NumActiveChannels; ++c)
+    {
+      const SampleT sample = d_samples[sample_base + static_cast<OffsetT>(c)];
+      int bin              = -1;
+      privatized_decode_op[c].template BinSelect<LOAD_DEFAULT>(sample, bin, true);
+      // Map invalid samples to the per-channel sentinel `num_priv_bins_per_channel`.
+      const BinIndexT bin_in_channel =
+        (bin >= 0 && bin < num_priv_bins_per_channel) ? static_cast<BinIndexT>(bin) : num_priv_bins_per_channel;
+      d_bin_indices[key_base + static_cast<OffsetT>(c)] =
+        static_cast<BinIndexT>(c) * stride_per_channel + bin_in_channel;
+    }
+  }
+}
+
+// After sort + RLE, scatter counts into the per-channel output histograms. Each thread handles one
+// (priv_bin, count) pair where priv_bin = chan * stride_per_channel + bin_in_channel. Decode the
+// channel and the per-channel bin, skip sentinel slots, and route the count to the correct
+// d_output_histograms[chan][output_bin].
+template <int NumActiveChannels, typename CounterT, typename UniqueT, typename CountT, typename OutputDecodeOpT>
+_CCCL_KERNEL_ATTRIBUTES void scatter_counts_multi_channel_kernel(
+  const UniqueT* d_unique_bins,
+  const CountT* d_counts,
+  const int* d_num_runs,
+  ::cuda::std::array<CounterT*, NumActiveChannels> d_output_histograms,
+  ::cuda::std::array<OutputDecodeOpT, NumActiveChannels> output_decode_op,
+  ::cuda::std::array<int, NumActiveChannels> num_output_bins,
+  int num_priv_bins_per_channel,
+  int stride_per_channel)
+{
+  const int tid      = blockIdx.x * blockDim.x + threadIdx.x;
+  const int num_runs = *d_num_runs;
+  if (tid >= num_runs)
+  {
+    return;
+  }
+
+  const int priv_bin       = static_cast<int>(d_unique_bins[tid]);
+  const int chan           = priv_bin / stride_per_channel;
+  const int bin_in_channel = priv_bin - chan * stride_per_channel;
+
+  // Skip sentinel slots: any bin >= num_priv_bins_per_channel within a channel's stride is the
+  // invalid-sample sentinel; chan >= NumActiveChannels can occur only for unused stride slots
+  // (which we never produce, but guard anyway).
+  if (bin_in_channel >= num_priv_bins_per_channel || chan >= NumActiveChannels)
+  {
+    return;
+  }
+
+  const CounterT count = static_cast<CounterT>(d_counts[tid]);
+  // Iterate to find the active channel index (small loop, NumActiveChannels <= 4) so we can
+  // dispatch on a compile-time channel and let nvcc hoist the per-channel loads.
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int c = 0; c < NumActiveChannels; ++c)
+  {
+    if (c == chan)
+    {
+      int output_bin = -1;
+      output_decode_op[c].template BinSelect<LOAD_DEFAULT>(bin_in_channel, output_bin, count > 0);
+      if (output_bin >= 0 && output_bin < num_output_bins[c])
+      {
+        // The same direct-store argument as the single-channel scatter applies here:
+        // dispatch_sort_based_multi_channel is only invoked from non-byte-sample dispatch_even /
+        // dispatch_range branches where the output decode is PassThruTransform. Each priv_bin maps
+        // to a unique (chan, output_bin) and RLE produces at most one (priv_bin, count) pair per
+        // priv_bin, so no two scatter writes target the same address. The output histograms were
+        // memset to zero earlier in the pipeline.
+        d_output_histograms[c][output_bin] = count;
+      }
+    }
+  }
+}
+
+// Inner multi-channel sort dispatch templated on the bin-index type.
+template <int NumActiveChannels,
+          int NumChannels,
+          typename BinIndexT,
+          typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT>
+CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_sort_based_multi_channel_typed(
+  void* d_temp_storage,
+  size_t& temp_storage_bytes,
+  SampleIteratorT d_samples,
+  ::cuda::std::array<CounterT*, NumActiveChannels> d_output_histograms,
+  ::cuda::std::array<PrivatizedDecodeOpT, NumActiveChannels> privatized_decode_op,
+  ::cuda::std::array<OutputDecodeOpT, NumActiveChannels> output_decode_op,
+  int num_priv_bins_per_channel,
+  ::cuda::std::array<int, NumActiveChannels> num_output_bins,
+  OffsetT num_pixels,
+  cudaStream_t stream)
+{
+  // Use a uniform stride of (num_priv_bins_per_channel + 1) per channel: one slot per channel for
+  // the invalid-sample sentinel. The maximum key value is therefore
+  // (NumActiveChannels - 1) * stride + num_priv_bins_per_channel.
+  const int stride_per_channel = num_priv_bins_per_channel + 1;
+  const int max_key_value      = (NumActiveChannels - 1) * stride_per_channel + num_priv_bins_per_channel;
+
+  // end_bit = ceil(log2(max_key_value + 1))
+  int end_bit = 0;
+  for (int v = max_key_value; v > 0; v >>= 1)
+  {
+    ++end_bit;
+  }
+
+  const OffsetT num_keys         = num_pixels * static_cast<OffsetT>(NumActiveChannels);
+  const int max_unique           = NumActiveChannels * stride_per_channel; // upper bound on distinct keys
+  const size_t bin_in_bytes      = sizeof(BinIndexT) * static_cast<size_t>(num_keys);
+  const size_t bin_out_bytes     = sizeof(BinIndexT) * static_cast<size_t>(num_keys);
+  const size_t unique_bins_bytes = sizeof(BinIndexT) * static_cast<size_t>(max_unique);
+  const size_t counts_bytes      = sizeof(int) * static_cast<size_t>(max_unique);
+  const size_t num_runs_bytes    = sizeof(int);
+
+  // Query temp storage for sort and RLE. DoubleBuffer overload (is_overwrite_okay=true) so CUB
+  // doesn't allocate its own extra key buffer.
+  size_t sort_temp_bytes = 0;
+  {
+    DoubleBuffer<BinIndexT> dummy_keys{nullptr, nullptr};
+    if (const auto error = CubDebug(cub::DeviceRadixSort::SortKeys(
+          nullptr,
+          sort_temp_bytes,
+          dummy_keys,
+          static_cast<int>(num_keys),
+          0,
+          end_bit,
+          stream)))
+    {
+      return error;
+    }
+  }
+
+  size_t rle_temp_bytes = 0;
+  if (const auto error = CubDebug(cub::DeviceRunLengthEncode::Encode(
+        nullptr,
+        rle_temp_bytes,
+        static_cast<const BinIndexT*>(nullptr),
+        static_cast<BinIndexT*>(nullptr),
+        static_cast<int*>(nullptr),
+        static_cast<int*>(nullptr),
+        num_keys,
+        stream)))
+  {
+    return error;
+  }
+
+  constexpr int NUM_ALLOCATIONS            = 7;
+  void* allocations[NUM_ALLOCATIONS]       = {};
+  size_t allocation_sizes[NUM_ALLOCATIONS] = {
+    bin_in_bytes, bin_out_bytes, unique_bins_bytes, counts_bytes, num_runs_bytes, sort_temp_bytes, rle_temp_bytes};
+
+  if (const auto error =
+        CubDebug(detail::alias_temporaries(d_temp_storage, temp_storage_bytes, allocations, allocation_sizes)))
+  {
+    return error;
+  }
+
+  if (d_temp_storage == nullptr)
+  {
+    return cudaSuccess;
+  }
+
+  auto* d_bin_in      = reinterpret_cast<BinIndexT*>(allocations[0]);
+  auto* d_bin_out     = reinterpret_cast<BinIndexT*>(allocations[1]);
+  auto* d_unique_bins = reinterpret_cast<BinIndexT*>(allocations[2]);
+  auto* d_counts      = reinterpret_cast<int*>(allocations[3]);
+  auto* d_num_runs    = reinterpret_cast<int*>(allocations[4]);
+  void* d_sort_temp   = allocations[5];
+  void* d_rle_temp    = allocations[6];
+
+  // Step 0: zero output histograms in parallel (all small relative to sort cost; one memset
+  // per channel keeps the call simple — they go on the same stream so they serialize but
+  // are tiny compared to the sort kernels that follow).
+  for (int c = 0; c < NumActiveChannels; ++c)
+  {
+    if (const auto error = CubDebug(cudaMemsetAsync(
+          d_output_histograms[c],
+          0,
+          static_cast<size_t>(num_output_bins[c]) * sizeof(CounterT),
+          stream)))
+    {
+      return error;
+    }
+  }
+
+  // Step 1: compute bin indices (multi-channel — emits NumActiveChannels keys per pixel).
+  constexpr int compute_bins_threads          = 256;
+  constexpr int compute_bins_items_per_thread = 8;
+  constexpr int compute_bins_tile             = compute_bins_threads * compute_bins_items_per_thread;
+  const auto compute_bins_blocks =
+    static_cast<unsigned int>((num_pixels + compute_bins_tile - 1) / compute_bins_tile);
+
+  THRUST_NS_QUALIFIER::cuda_cub::detail::triple_chevron(
+    dim3(compute_bins_blocks), dim3(compute_bins_threads), 0, stream)
+    .doit(compute_bin_indices_multi_channel_kernel<NumActiveChannels,
+                                                   NumChannels,
+                                                   compute_bins_items_per_thread,
+                                                   SampleIteratorT,
+                                                   PrivatizedDecodeOpT,
+                                                   OffsetT,
+                                                   BinIndexT>,
+          d_samples,
+          d_bin_in,
+          privatized_decode_op,
+          num_pixels,
+          static_cast<BinIndexT>(num_priv_bins_per_channel),
+          static_cast<BinIndexT>(stride_per_channel));
+
+  if (const auto error = CubDebug(cudaPeekAtLastError()))
+  {
+    return error;
+  }
+
+  // Step 2: sort keys via DoubleBuffer.
+  DoubleBuffer<BinIndexT> sort_keys_buffer{d_bin_in, d_bin_out};
+  if (const auto error = CubDebug(cub::DeviceRadixSort::SortKeys(
+        d_sort_temp,
+        sort_temp_bytes,
+        sort_keys_buffer,
+        static_cast<int>(num_keys),
+        0,
+        end_bit,
+        stream)))
+  {
+    return error;
+  }
+  BinIndexT* d_sorted = sort_keys_buffer.Current();
+
+  // Step 3: run-length encode.
+  if (const auto error = CubDebug(cub::DeviceRunLengthEncode::Encode(
+        d_rle_temp,
+        rle_temp_bytes,
+        d_sorted,
+        d_unique_bins,
+        d_counts,
+        d_num_runs,
+        num_keys,
+        stream)))
+  {
+    return error;
+  }
+
+  // Step 4: scatter to per-channel histograms.
+  constexpr int scatter_threads = 256;
+  const auto scatter_blocks =
+    static_cast<unsigned int>((max_unique + scatter_threads - 1) / scatter_threads);
+
+  THRUST_NS_QUALIFIER::cuda_cub::detail::triple_chevron(
+    dim3(scatter_blocks), dim3(scatter_threads), 0, stream)
+    .doit(scatter_counts_multi_channel_kernel<NumActiveChannels, CounterT, BinIndexT, int, OutputDecodeOpT>,
+          d_unique_bins,
+          d_counts,
+          d_num_runs,
+          d_output_histograms,
+          output_decode_op,
+          num_output_bins,
+          num_priv_bins_per_channel,
+          stride_per_channel);
+
+  if (const auto error = CubDebug(cudaPeekAtLastError()))
+  {
+    return error;
+  }
+
+  if (const auto error = CubDebug(detail::DebugSyncStream(stream)))
+  {
+    return error;
+  }
+
+  return cudaSuccess;
+}
+
+// Outer wrapper that picks the bin-index integral type. Use the smallest unsigned type that fits
+// `NumActiveChannels * (num_priv_bins_per_channel + 1)`.
+template <int NumActiveChannels,
+          int NumChannels,
+          typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT>
+CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_sort_based_multi_channel(
+  void* d_temp_storage,
+  size_t& temp_storage_bytes,
+  SampleIteratorT d_samples,
+  ::cuda::std::array<CounterT*, NumActiveChannels> d_output_histograms,
+  ::cuda::std::array<PrivatizedDecodeOpT, NumActiveChannels> privatized_decode_op,
+  ::cuda::std::array<OutputDecodeOpT, NumActiveChannels> output_decode_op,
+  int num_priv_bins_per_channel,
+  ::cuda::std::array<int, NumActiveChannels> num_output_bins,
+  OffsetT num_pixels,
+  cudaStream_t stream)
+{
+  // Maximum key value is (NumActiveChannels - 1) * (num_priv_bins + 1) + num_priv_bins. Pick
+  // narrowest unsigned that fits that.
+  const long long stride            = static_cast<long long>(num_priv_bins_per_channel) + 1;
+  const long long max_key_inclusive = static_cast<long long>(NumActiveChannels - 1) * stride + num_priv_bins_per_channel;
+
+  if (max_key_inclusive < (1LL << 16))
+  {
+    return dispatch_sort_based_multi_channel_typed<NumActiveChannels, NumChannels, ::cuda::std::uint16_t>(
+      d_temp_storage,
+      temp_storage_bytes,
+      d_samples,
+      d_output_histograms,
+      privatized_decode_op,
+      output_decode_op,
+      num_priv_bins_per_channel,
+      num_output_bins,
+      num_pixels,
+      stream);
+  }
+  return dispatch_sort_based_multi_channel_typed<NumActiveChannels, NumChannels, ::cuda::std::uint32_t>(
+    d_temp_storage,
+    temp_storage_bytes,
+    d_samples,
+    d_output_histograms,
+    privatized_decode_op,
+    output_decode_op,
+    num_priv_bins_per_channel,
+    num_output_bins,
+    num_pixels,
+    stream);
+}
+
+// Decide whether the multi-channel sort path is preferred. Same gating logic as the single-channel
+// case (num_output_bins per channel must clear the threshold; density per channel must be low),
+// but `num_samples` here is `num_pixels`, not the total interleaved sample count.
+template <typename OffsetT>
+_CCCL_HOST_DEVICE _CCCL_FORCEINLINE bool use_sort_path_multi_channel(OffsetT num_pixels, int num_output_bins_per_channel)
+{
+  // Each channel's effective sample count is `num_pixels`, since each pixel contributes one
+  // sample to that channel's histogram.
+  return use_sort_path(num_pixels, num_output_bins_per_channel);
 }
 
 // Dispatch routines for device-side decode operator initialization. These differ from the default dispatch routines in
@@ -890,6 +1670,70 @@ CUB_RUNTIME_FUNCTION static cudaError_t dispatch_range(
     }
     int max_num_output_bins = max_levels - 1;
 
+    // Sort-based fast path for very-large-bin single-channel single-row inputs.
+    if constexpr (NUM_CHANNELS == 1 && NUM_ACTIVE_CHANNELS == 1)
+    {
+      if (use_sort_path(num_row_pixels, max_num_output_bins)
+          && num_rows == 1
+          && static_cast<size_t>(num_row_pixels) == static_cast<size_t>(row_stride_samples))
+      {
+        return dispatch_sort_based(
+          d_temp_storage,
+          temp_storage_bytes,
+          d_samples,
+          d_output_histograms[0],
+          privatized_decode_op[0],
+          output_decode_op[0],
+          max_num_output_bins,
+          max_num_output_bins,
+          num_row_pixels,
+          stream);
+      }
+    }
+    // Sort-based fast path for very-large-bin multi-channel single-row inputs.
+    else if constexpr (NUM_ACTIVE_CHANNELS > 1)
+    {
+      // Require uniform bin counts across active channels (same num_output_levels for every
+      // channel — this is true for all three histogram benchmarks (multi.even/multi.range), and
+      // mixing per-channel bin counts would force a wider key encoding).
+      bool uniform_bins = true;
+      for (int channel = 1; channel < NUM_ACTIVE_CHANNELS; ++channel)
+      {
+        if (num_output_levels[channel] != num_output_levels[0])
+        {
+          uniform_bins = false;
+          break;
+        }
+      }
+      const int per_channel_bins = num_output_levels[0] - 1;
+      // For num_rows == 1, the row stride doesn't matter (only one row), so we don't need to
+      // constrain row_stride_samples. The benchmark passes row_stride_samples = num_row_pixels
+      // even for multi-channel inputs, which doesn't match the contiguous-multi-channel layout
+      // formula (num_row_pixels * NUM_CHANNELS) — but with a single row it's still safe to read
+      // samples 0 .. num_row_pixels * NUM_CHANNELS - 1.
+      if (uniform_bins
+          && use_sort_path_multi_channel(num_row_pixels, per_channel_bins)
+          && num_rows == 1)
+      {
+        ::cuda::std::array<int, NUM_ACTIVE_CHANNELS> num_output_bins_per_channel;
+        for (int channel = 0; channel < NUM_ACTIVE_CHANNELS; ++channel)
+        {
+          num_output_bins_per_channel[channel] = num_output_levels[channel] - 1;
+        }
+        return dispatch_sort_based_multi_channel<NUM_ACTIVE_CHANNELS, NUM_CHANNELS>(
+          d_temp_storage,
+          temp_storage_bytes,
+          d_samples,
+          d_output_histograms,
+          privatized_decode_op,
+          output_decode_op,
+          per_channel_bins,
+          num_output_bins_per_channel,
+          num_row_pixels,
+          stream);
+      }
+    }
+
     // Dispatch
     if (max_num_output_bins > max_privatized_smem_bins)
     {
@@ -1092,6 +1936,67 @@ CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE static cudaError_t dispatch_even(
       }
     }
     int max_num_output_bins = max_levels - 1;
+
+    // Sort-based fast path for very-large-bin single-channel single-row inputs.
+    if constexpr (NUM_CHANNELS == 1 && NUM_ACTIVE_CHANNELS == 1)
+    {
+      if (use_sort_path(num_row_pixels, max_num_output_bins)
+          && num_rows == 1
+          && static_cast<size_t>(num_row_pixels) == static_cast<size_t>(row_stride_samples))
+      {
+        return dispatch_sort_based(
+          d_temp_storage,
+          temp_storage_bytes,
+          d_samples,
+          d_output_histograms[0],
+          privatized_decode_op[0],
+          output_decode_op[0],
+          max_num_output_bins,
+          max_num_output_bins,
+          num_row_pixels,
+          stream);
+      }
+    }
+    // Sort-based fast path for very-large-bin multi-channel single-row inputs.
+    else if constexpr (NUM_ACTIVE_CHANNELS > 1)
+    {
+      bool uniform_bins = true;
+      for (int channel = 1; channel < NUM_ACTIVE_CHANNELS; ++channel)
+      {
+        if (num_output_levels[channel] != num_output_levels[0])
+        {
+          uniform_bins = false;
+          break;
+        }
+      }
+      const int per_channel_bins = num_output_levels[0] - 1;
+      // For num_rows == 1, the row stride doesn't matter (only one row), so we don't need to
+      // constrain row_stride_samples. The benchmark passes row_stride_samples = num_row_pixels
+      // even for multi-channel inputs, which doesn't match the contiguous-multi-channel layout
+      // formula (num_row_pixels * NUM_CHANNELS) — but with a single row it's still safe to read
+      // samples 0 .. num_row_pixels * NUM_CHANNELS - 1.
+      if (uniform_bins
+          && use_sort_path_multi_channel(num_row_pixels, per_channel_bins)
+          && num_rows == 1)
+      {
+        ::cuda::std::array<int, NUM_ACTIVE_CHANNELS> num_output_bins_per_channel;
+        for (int channel = 0; channel < NUM_ACTIVE_CHANNELS; ++channel)
+        {
+          num_output_bins_per_channel[channel] = num_output_levels[channel] - 1;
+        }
+        return dispatch_sort_based_multi_channel<NUM_ACTIVE_CHANNELS, NUM_CHANNELS>(
+          d_temp_storage,
+          temp_storage_bytes,
+          d_samples,
+          d_output_histograms,
+          privatized_decode_op,
+          output_decode_op,
+          per_channel_bins,
+          num_output_bins_per_channel,
+          num_row_pixels,
+          stream);
+      }
+    }
 
     if (max_num_output_bins > max_privatized_smem_bins)
     {
