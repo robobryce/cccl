@@ -95,6 +95,41 @@ static void even(nvbench::state& state, nvbench::type_list<SampleT, CounterT, Of
   thrust::device_vector<nvbench::uint8_t> tmp(temp_storage_bytes);
   d_temp_storage = thrust::raw_pointer_cast(tmp.data());
 
+  // Run the dispatch once outside the timed region and verify the result
+  // bin-by-bin against an independent CPU reference. A failure here aborts
+  // the benchmark cell so silent dispatch failures or sample-loss bugs
+  // cannot inflate the reported bandwidth.
+  thrust::fill(hist.begin(), hist.end(), CounterT{0});
+  bench_check_cuda(
+    dispatch_t::DispatchEven(
+      d_temp_storage,
+      temp_storage_bytes,
+      d_input,
+      {d_histogram},
+      {num_levels},
+      {lower_level},
+      {upper_level},
+      num_row_pixels,
+      num_rows,
+      row_stride_samples,
+      cudaStream_t{nullptr},
+      is_byte_sample),
+    "warmup DispatchEven");
+  bench_check_cuda(cudaDeviceSynchronize(), "warmup sync");
+
+  std::vector<thrust::device_vector<CounterT>> opt_hists_d;
+  opt_hists_d.emplace_back(std::move(hist));
+  bench_verify_histogram_even<num_channels, num_active_channels, SampleT, CounterT, OffsetT>(
+    input,
+    opt_hists_d,
+    static_cast<OffsetT>(elements),
+    static_cast<int>(num_bins),
+    lower_level,
+    upper_level,
+    "even");
+  hist        = std::move(opt_hists_d[0]);
+  d_histogram = thrust::raw_pointer_cast(hist.data());
+
   // Force the persisting-L2 reservation back to 0 and demote any persisting
   // lines outside the timed window, so neither cudaAccessPolicyWindow nor a
   // bumped cudaLimitPersistingL2CacheSize can carry across iterations. The

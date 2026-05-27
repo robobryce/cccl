@@ -126,6 +126,54 @@ static void range(nvbench::state& state, nvbench::type_list<SampleT, CounterT, O
   thrust::device_vector<nvbench::uint8_t> tmp(temp_storage_bytes);
   d_temp_storage = thrust::raw_pointer_cast(tmp.data());
 
+  // Run the dispatch once outside the timed region and verify each channel
+  // bin-by-bin against a CPU reference.
+  thrust::fill(hist_r.begin(), hist_r.end(), CounterT{0});
+  thrust::fill(hist_g.begin(), hist_g.end(), CounterT{0});
+  thrust::fill(hist_b.begin(), hist_b.end(), CounterT{0});
+  bench_check_cuda(
+    dispatch_t::DispatchRange(
+      d_temp_storage,
+      temp_storage_bytes,
+      d_input,
+      {d_histogram_r, d_histogram_g, d_histogram_b},
+      {num_levels_r, num_levels_g, num_levels_b},
+      {d_levels_r, d_levels_g, d_levels_b},
+      num_row_pixels,
+      num_rows,
+      row_stride_samples,
+      cudaStream_t{nullptr},
+      is_byte_sample),
+    "warmup DispatchRange");
+  bench_check_cuda(cudaDeviceSynchronize(), "warmup sync");
+
+  std::vector<thrust::device_vector<CounterT>> opt_hists_d;
+  opt_hists_d.emplace_back(std::move(hist_r));
+  opt_hists_d.emplace_back(std::move(hist_g));
+  opt_hists_d.emplace_back(std::move(hist_b));
+  std::vector<thrust::device_vector<SampleT>> d_levels_per_channel;
+  d_levels_per_channel.emplace_back(std::move(levels_r));
+  d_levels_per_channel.emplace_back(std::move(levels_g));
+  d_levels_per_channel.emplace_back(std::move(levels_b));
+  bench_verify_histogram_range<num_channels, num_active_channels, SampleT, CounterT, OffsetT>(
+    input,
+    opt_hists_d,
+    d_levels_per_channel,
+    static_cast<OffsetT>(elements),
+    "multi.range");
+  hist_r        = std::move(opt_hists_d[0]);
+  hist_g        = std::move(opt_hists_d[1]);
+  hist_b        = std::move(opt_hists_d[2]);
+  d_histogram_r = thrust::raw_pointer_cast(hist_r.data());
+  d_histogram_g = thrust::raw_pointer_cast(hist_g.data());
+  d_histogram_b = thrust::raw_pointer_cast(hist_b.data());
+  levels_r      = std::move(d_levels_per_channel[0]);
+  levels_g      = std::move(d_levels_per_channel[1]);
+  levels_b      = std::move(d_levels_per_channel[2]);
+  d_levels_r    = thrust::raw_pointer_cast(levels_r.data());
+  d_levels_g    = thrust::raw_pointer_cast(levels_g.data());
+  d_levels_b    = thrust::raw_pointer_cast(levels_b.data());
+
   // Force the persisting-L2 reservation back to 0 and demote any persisting
   // lines outside the timed window, so neither cudaAccessPolicyWindow nor a
   // bumped cudaLimitPersistingL2CacheSize can carry across iterations. The
