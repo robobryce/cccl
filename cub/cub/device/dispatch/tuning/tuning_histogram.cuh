@@ -282,6 +282,26 @@ struct histogram_policy
   bool work_stealing;
   int vec_size;
   int pdl_trigger_next_launch_in_init_kernel_max_bin_count;
+  // Thread count for the high-bin DIRECT-ATOMIC kernels (the cuckoo and
+  // single-probe persistent kernels that atomic straight to the output rather
+  // than running the SMEM-privatized sweep). 0 means "inherit
+  // `threads_per_block`" (the default for every policy that does not override
+  // it). These kernels distribute work via a pure grid-stride loop, so any
+  // block size is correct; decoupling their thread count from the SMEM-priv
+  // sweep's lets a policy give the latency-/SMEM-throughput-bound direct-atomic
+  // path its own launch shape (e.g. a smaller block so more, smaller blocks are
+  // co-resident, spreading the dynamic-SMEM cache and shortening each block's
+  // atomic dependency chain) without disturbing the sweep tiers that share the
+  // same policy.
+  int direct_atomic_threads_per_block = 0;
+
+  // Resolved direct-atomic thread count: the override when set, else the sweep
+  // thread count. Used by both the host dispatch launch and the direct-atomic
+  // kernels' __launch_bounds__.
+  [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr int direct_atomic_threads() const
+  {
+    return direct_atomic_threads_per_block != 0 ? direct_atomic_threads_per_block : threads_per_block;
+  }
 
   [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr friend bool
   operator==(const histogram_policy& lhs, const histogram_policy& rhs)
@@ -291,7 +311,8 @@ struct histogram_policy
         && lhs.rle_compress == rhs.rle_compress && lhs.mem_preference == rhs.mem_preference
         && lhs.work_stealing == rhs.work_stealing && lhs.vec_size == rhs.vec_size
         && lhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
-             == rhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count;
+             == rhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
+        && lhs.direct_atomic_threads_per_block == rhs.direct_atomic_threads_per_block;
   }
 
   [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr friend bool
@@ -309,7 +330,8 @@ struct histogram_policy
         << ", .load_modifier = " << p.load_modifier << ", .rle_compress = " << p.rle_compress
         << ", .mem_preference = " << p.mem_preference << ", .work_stealing = " << p.work_stealing
         << ", .vec_size = " << p.vec_size << ", .pdl_trigger_next_launch_in_init_kernel_max_bin_count = "
-        << p.pdl_trigger_next_launch_in_init_kernel_max_bin_count << " }";
+        << p.pdl_trigger_next_launch_in_init_kernel_max_bin_count
+        << ", .direct_atomic_threads_per_block = " << p.direct_atomic_threads_per_block << " }";
   }
 #endif // _CCCL_HOSTED()
 };
@@ -415,6 +437,13 @@ public:
           // L1/L2 caching the SearchTransform level-array + sample loads across the
           // 3 active channels on the SMEM-priv mid-bin sweep cells; LDG's streaming
           // loads avoid the eviction churn).
+          //
+          // NOTE: the multi-channel direct-atomic RANGE decouple
+          // (direct_atomic_threads_per_block=384) lives on a separate branch in
+          // this run (worker-3 brief-4); it is intentionally NOT applied here so
+          // this branch's iteration-0 infra port stays metric-neutral on multi
+          // and isolates the single-channel RANGE direct-atomic sweep that this
+          // brief targets. The manager owns combining the multi win.
           return histogram_policy{1024, t_scale(16), BLOCK_LOAD_DIRECT, LOAD_LDG, true, SMEM, false, 4, 0};
         }
         else
