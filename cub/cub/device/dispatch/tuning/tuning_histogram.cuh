@@ -339,6 +339,14 @@ struct histogram_policy
   // same policy.
   int direct_atomic_threads_per_block = 0;
 
+  // Whether the GMEM-privatized / direct-atomic paths coalesce a warp's same-bin
+  // lanes into one atomic (the dual of `rle_compress`; see warp_coalesce_atomic).
+  // On by default -- the contention win on the hot-bin direct-atomic path;
+  // exposed here so the behavior is controlled in one place. Trailing + defaulted
+  // so positional policy braces above (which stop at direct_atomic_threads) are
+  // unaffected.
+  bool warp_coalesce = true;
+
   // Resolved direct-atomic thread count: the override when set, else the sweep
   // thread count. Used by both the host dispatch launch and the direct-atomic
   // kernels' __launch_bounds__.
@@ -356,7 +364,8 @@ struct histogram_policy
         && lhs.work_stealing == rhs.work_stealing && lhs.vec_size == rhs.vec_size
         && lhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
              == rhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
-        && lhs.direct_atomic_threads_per_block == rhs.direct_atomic_threads_per_block;
+        && lhs.direct_atomic_threads_per_block == rhs.direct_atomic_threads_per_block
+        && lhs.warp_coalesce == rhs.warp_coalesce;
   }
 
   [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr friend bool
@@ -375,7 +384,8 @@ struct histogram_policy
         << ", .mem_preference = " << p.mem_preference << ", .work_stealing = " << p.work_stealing
         << ", .vec_size = " << p.vec_size << ", .pdl_trigger_next_launch_in_init_kernel_max_bin_count = "
         << p.pdl_trigger_next_launch_in_init_kernel_max_bin_count
-        << ", .direct_atomic_threads_per_block = " << p.direct_atomic_threads_per_block << " }";
+        << ", .direct_atomic_threads_per_block = " << p.direct_atomic_threads_per_block
+        << ", .warp_coalesce = " << p.warp_coalesce << " }";
   }
 #endif // _CCCL_HOSTED()
 };
