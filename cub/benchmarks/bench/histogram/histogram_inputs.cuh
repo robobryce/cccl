@@ -56,9 +56,10 @@ enum class InputShape
                   // s >= 0 (default 1.0).
   hash_synonym,   // hot bins all collide on one cache slot. KNOB = hot share
                   // in [0,1] (default 0.9).
-  stale_resident, // cold prefix claims slots, then a hot bulk (attacks
-                  // no-evict). KNOB = prefix coverage as a multiple of cache
-                  // slots (default 1.0 => claim `slots` bins).
+  stale_resident, // a cold working set, swept cyclically, that recurs in every
+                  // block but overflows the SMEM cache so it cannot stay resident
+                  // (thrashes it). KNOB = working-set size as a multiple of cache
+                  // slots (default 2.0 => twice the slots, overflowing the cache).
   temporal_phases,// the hot bin steps to a new location across phases. KNOB =
                   // number of phases (default 8).
   strided_sweep,  // bin = stride*i % B (minimal temporal locality). KNOB =
@@ -405,22 +406,32 @@ struct shuffled_uniform_functor
   }
 };
 
-// stale_resident: a cold prefix sweeps `n_cold` distinct bins once (claiming
-// every cache slot), then the hot bulk hammers a single bin disjoint from the
-// prefix.
+// stale_resident: a cold WORKING SET of `span` distinct bins (sized as a multiple
+// of the SMEM cache capacity via the cover knob), scattered across the bin array
+// and swept CYCLICALLY. The same `span` keys recur in every block/tile -- so the
+// per-block cache is hit by them on every block -- but when span > cache slots the
+// set cannot stay resident: each key is evicted before it comes around again, so
+// the cache yields ~no benefit (the keys are "stale residents" that thrash it).
+// span <= slots fits and caches well; the default (cover=2 => 2*slots) overflows
+// it. The cyclic SEQUENTIAL reuse (each key revisited at a fixed stride apart) is
+// what makes the cache's capacity boundary actually show. The cyclic counter advances
+// by a large odd stride so a thread's grid-strided positions still walk distinct
+// keys (it does not alias the launch's grid stride).
 template <class SampleT, class Mapper>
 struct stale_functor
 {
   int num_bins;
-  uint64_t n_cold;
-  int hot_bin;
+  uint64_t span; // size of the cold working set (number of distinct bins)
+  uint64_t offset;
   Mapper mapper;
 
   template <class I>
   __host__ __device__ SampleT operator()(I i) const
   {
-    uint64_t idx = static_cast<uint64_t>(i);
-    int bin      = (idx < n_cold) ? static_cast<int>(idx % static_cast<uint64_t>(num_bins)) : hot_bin;
+    // Position -> which cold key. A large odd multiplier decorrelates the key
+    // index from the grid-stride launch geometry while still cycling [0, span).
+    const uint64_t k = (static_cast<uint64_t>(i) * 2654435761ull) % span;
+    const int bin    = scatter_bin(k, num_bins, offset); // scatter across the array
     return mapper(bin);
   }
 };
@@ -485,34 +496,70 @@ inline double solve_powerlaw_exponent(int num_bins, double target)
   return 0.5 * (lo + hi);
 }
 
-// Spike-slab pmf: probability `p` on one hot bin, `(1-p)` spread uniformly over
-// all bins. Normalized entropy decreases monotonically from 1.0 (p=0, uniform)
-// to 0.0 (p=1, single bin), so we bisect `p` to hit a target entropy.
-inline double spike_slab_entropy(int num_bins, double p)
+// Softmax-over-random-logits pmf: draw a fixed random logit g[b] per bin, then
+// pmf[b] = softmax(g/T)[b]. Temperature T dials the spread CONTINUOUSLY and
+// SMOOTHLY: T->inf gives uniform (entropy 1.0), T->0 concentrates onto the
+// single largest-logit bin (entropy 0.0). Unlike the old spike-slab (one hot bin
+// over a flat floor), EVERY bin stays occupied and varies randomly -- e.g. at
+// entropy 0.75 the distribution is "mostly uniform with mild random variation",
+// not one dominant spike. Normalized entropy is monotincreasing in T, so we
+// bisect log(T) to hit a target entropy. The logits are seeded so the shape is
+// reproducible and the mode is not pinned to bin 0.
+inline std::vector<double> softmax_logits(int num_bins, uint64_t seed)
 {
-  const double base = (1.0 - p) / num_bins;
-  std::vector<double> pmf(num_bins, base);
-  pmf[0] += p;
-  return normalized_entropy(pmf);
+  std::vector<double> g(num_bins);
+  for (int b = 0; b < num_bins; ++b)
+  {
+    // Two hashed uniforms -> a standard-normal logit via Box-Muller. Decorrelated
+    // per bin; host/device parity not required (concentrated interior is not swept).
+    const double u1 = u01_from_hash(element_key(static_cast<uint64_t>(b), seed));
+    const double u2 = u01_from_hash(element_key(static_cast<uint64_t>(b), seed ^ 0xD1B54A32D192ED03ull));
+    const double r  = std::sqrt(-2.0 * std::log(u1 > 0.0 ? u1 : 1e-300));
+    g[b]            = r * std::cos(6.283185307179586 * u2);
+  }
+  return g;
 }
 
-inline double solve_spike_share(int num_bins, double target)
+inline std::vector<double> softmax_pmf(const std::vector<double>& g, double T)
 {
-  double lo = 0.0, hi = 1.0;
-  for (int it = 0; it < 60; ++it)
+  const int num_bins = static_cast<int>(g.size());
+  double gmax        = g[0];
+  for (double v : g)
   {
-    const double mid = 0.5 * (lo + hi);
-    const double h   = spike_slab_entropy(num_bins, mid);
-    if (h < target)
+    gmax = v > gmax ? v : gmax;
+  }
+  std::vector<double> pmf(num_bins);
+  double sum = 0.0;
+  for (int b = 0; b < num_bins; ++b)
+  {
+    pmf[b] = std::exp((g[b] - gmax) / T);
+    sum += pmf[b];
+  }
+  for (double& v : pmf)
+  {
+    v /= sum;
+  }
+  return pmf;
+}
+
+inline std::vector<double> solve_softmax_pmf(int num_bins, double target, uint64_t seed)
+{
+  const std::vector<double> g = softmax_logits(num_bins, seed);
+  // Bisect in log-space: entropy increases with T.
+  double lo = 1e-3, hi = 1e3;
+  for (int it = 0; it < 80; ++it)
+  {
+    const double mid = std::sqrt(lo * hi);
+    if (normalized_entropy(softmax_pmf(g, mid)) < target)
     {
-      hi = mid; // too concentrated -> reduce p
+      lo = mid; // too concentrated -> raise T
     }
     else
     {
-      lo = mid;
+      hi = mid;
     }
   }
-  return 0.5 * (lo + hi);
+  return softmax_pmf(g, std::sqrt(lo * hi));
 }
 
 // Defaults applied when the axis value supplies no knob.
@@ -552,13 +599,10 @@ inline std::vector<double> build_pmf(const ShapeSpec& spec, int num_bins, uint64
       }
       else
       {
-        const double p       = solve_spike_share(num_bins, target);
-        const double floor_p = (1.0 - p) / num_bins;
-        for (int b = 0; b < num_bins; ++b)
-        {
-          pmf[b] = floor_p;
-        }
-        pmf[scatter_bin(0, num_bins, offset)] += p;
+        // Completely random bin probabilities dialed to the target entropy: a
+        // softmax over per-bin random logits. All bins occupied, smoothly more
+        // uniform as the knob -> 1 (no single dominant "hot" bin).
+        pmf = solve_softmax_pmf(num_bins, target, seed);
       }
       break;
     }
@@ -698,16 +742,13 @@ generate_shape_impl(const ShapeSpec& spec, OffsetT n, int num_bins, Mapper mappe
       break;
     }
     case InputShape::stale_resident: {
-      // KNOB = prefix coverage as a multiple of cache slots (default 1.0).
-      const double cover    = knob_or(spec, 1.0);
-      const int64_t want    = static_cast<int64_t>(std::llround(cover * kAdversarialCacheSlots));
-      const uint64_t n_cold = static_cast<uint64_t>(std::max<int64_t>(1, std::min<int64_t>(want, num_bins)));
-      // hot bin disjoint from the cold prefix [0, n_cold) when possible.
-      const int hot_bin =
-        (num_bins > static_cast<int>(n_cold))
-          ? static_cast<int>(n_cold + (offset % (static_cast<uint64_t>(num_bins) - n_cold)))
-          : num_bins / 2;
-      stale_functor<SampleT, Mapper> fn{num_bins, n_cold, hot_bin, mapper};
+      // KNOB = cold working-set size as a multiple of cache slots (default 2.0 =>
+      // twice the slots, so it overflows and thrashes a per-block cache). The set
+      // recurs in every block but cannot stay resident when span > slots.
+      const double cover  = knob_or(spec, 2.0);
+      const int64_t want  = static_cast<int64_t>(std::llround(cover * kAdversarialCacheSlots));
+      const uint64_t span = static_cast<uint64_t>(std::max<int64_t>(1, std::min<int64_t>(want, num_bins)));
+      stale_functor<SampleT, Mapper> fn{num_bins, span, offset, mapper};
       thrust::tabulate(out.begin(), out.end(), fn);
       break;
     }
