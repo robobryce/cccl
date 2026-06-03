@@ -56,9 +56,6 @@ enum class InputShape
                   // s >= 0 (default 1.0).
   hash_synonym,   // hot bins all collide on one cache slot. KNOB = hot share
                   // in [0,1] (default 0.9).
-  capacity_cliff, // equiprobable active set sized around cache capacity. KNOB =
-                  // active set as a multiple of cache slots (default => slots+1,
-                  // the just-over-capacity cliff).
   stale_resident, // cold prefix claims slots, then a hot bulk (attacks
                   // no-evict). KNOB = prefix coverage as a multiple of cache
                   // slots (default 1.0 => claim `slots` bins).
@@ -66,6 +63,10 @@ enum class InputShape
                   // number of phases (default 8).
   strided_sweep,  // bin = stride*i % B (minimal temporal locality). KNOB =
                   // stride (default a large prime).
+  sawtooth,       // bin = i % period: a monotonic ramp 0..period-1 that resets
+                  // periodically (sequential locality over a bounded working
+                  // set). KNOB = ramp period in bins (default = num_bins => one
+                  // full 0..B-1 sweep, the classic sawtooth).
 };
 
 // A shape plus an optional knob value. `has_knob == false` means "use the
@@ -89,7 +90,6 @@ constexpr int kHashSynonymCount      = 32; // number of colliding bins
 //   "concentrated:0.5"    -> a single hot bin over a floor (was "spike")
 //   "concentrated:0.0"    -> a single bin gets 100% (was "constant")
 //   "powerlaw:0.3"        -> power law at target entropy 0.3
-//   "capacity_cliff"      -> default (slots+1) cliff
 // There is deliberately ONE concentrated shape spanning uniform<->constant via
 // its entropy knob -- no separate uniform/constant/spike names.
 inline ShapeSpec parse_input_shape(const std::string& spec)
@@ -108,10 +108,10 @@ inline ShapeSpec parse_input_shape(const std::string& spec)
   else if (name == "powerlaw") { out.shape = InputShape::powerlaw; }
   else if (name == "zipf")     { out.shape = InputShape::zipf; }
   else if (name == "hash_synonym")    { out.shape = InputShape::hash_synonym; }
-  else if (name == "capacity_cliff")  { out.shape = InputShape::capacity_cliff; }
   else if (name == "stale_resident")  { out.shape = InputShape::stale_resident; }
   else if (name == "temporal_phases") { out.shape = InputShape::temporal_phases; }
   else if (name == "strided_sweep")   { out.shape = InputShape::strided_sweep; }
+  else if (name == "sawtooth")         { out.shape = InputShape::sawtooth; }
   else { throw std::runtime_error("Unknown InputShape: " + spec); }
   return out;
 }
@@ -296,6 +296,25 @@ struct strided_functor
   }
 };
 
+// sawtooth: bin = i % period. A monotonically increasing ramp that resets to 0
+// every `period` elements -- sequential access over a bounded working set, with
+// a periodic discontinuity. With period == num_bins this is exactly the uniform
+// round-robin tiling (the concentrated:1.0 endpoint); smaller periods confine
+// the sweep to a `period`-bin window (e.g. period <= cache slots stays cache
+// resident, period just over it thrashes).
+template <class SampleT, class Mapper>
+struct sawtooth_functor
+{
+  uint64_t period;
+  Mapper mapper;
+
+  template <class I>
+  __host__ __device__ SampleT operator()(I i) const
+  {
+    return mapper(static_cast<int>(static_cast<uint64_t>(i) % period));
+  }
+};
+
 // temporal_phases: contiguous phases, each hammering one scattered bin.
 template <class SampleT, class Mapper>
 struct phases_functor
@@ -320,23 +339,69 @@ struct phases_functor
   }
 };
 
-// Exact uniform: round-robin tiling bin(i) = i % num_bins. Every bin receives
-// exactly floor(n/num_bins) or +1 samples -- ACTUALLY uniform (zero count
-// variance), unlike i.i.d. sampling of a uniform pmf which leaves multinomial
-// noise and ~37% empty bins when bins ~= elements. This is the canonical
-// entropy=1.0 endpoint. Access is sequential (a benign, low-contention
-// baseline); contrast strided_sweep, which uses a large coprime stride to
-// destroy locality on purpose.
-template <class SampleT, class Mapper>
-struct uniform_tiling_functor
+// A keyed pseudo-random bijection on [0, n), evaluated per index with no
+// buffers and no global sort: a 4-round balanced Feistel network with
+// cycle-walking. The Feistel is a bijection on the padded domain
+// [0, 2^(2*half)); cycle-walking (re-enciphering any result >= n) restricts it
+// to an exact bijection on [0, n). Used to put the exact-count uniform tiling
+// into a RANDOM sequence order (see shuffled_uniform_functor).
+__host__ __device__ inline uint64_t feistel_mix(uint64_t x, uint64_t k)
 {
+  uint64_t z = x + k + 0x9E3779B97F4A7C15ull;
+  z         = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z         = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+
+__host__ __device__ inline uint64_t permute_index(uint64_t i, uint64_t n, uint64_t seed)
+{
+  if (n <= 1)
+  {
+    return 0;
+  }
+  int bits = 0;
+  while ((n - 1) >> bits)
+  {
+    ++bits; // bits == ceil(log2(n)) for n >= 2
+  }
+  const int half        = (bits + 1) / 2;
+  const uint64_t mask    = (half >= 64) ? ~0ull : ((1ull << half) - 1ull);
+  uint64_t x             = i;
+  do
+  {
+    uint64_t l = (x >> half) & mask;
+    uint64_t r = x & mask;
+    for (int round = 0; round < 4; ++round)
+    {
+      const uint64_t nl = r;
+      const uint64_t nr = l ^ (feistel_mix(r, seed + static_cast<uint64_t>(round)) & mask);
+      l                 = nl;
+      r                 = nr;
+    }
+    x = (l << half) | r;
+  } while (x >= n); // cycle-walk back into range
+  return x;
+}
+
+// Exact uniform with RANDOM sequence order: every bin still receives exactly
+// floor(n/num_bins) or +1 samples (the round-robin tiling multiset), but the
+// positions are a pseudo-random permutation, so access is NOT sequential. This
+// is the entropy=1.0 endpoint: uniform counts, randomly distributed in the
+// input. (Pure sequential tiling bin(i)=i%num_bins is available as the
+// `sawtooth` shape; strided_sweep destroys locality with a coprime stride.)
+template <class SampleT, class Mapper>
+struct shuffled_uniform_functor
+{
+  uint64_t n;
   int num_bins;
+  uint64_t seed;
   Mapper mapper;
 
   template <class I>
   __host__ __device__ SampleT operator()(I i) const
   {
-    return mapper(static_cast<int>(static_cast<uint64_t>(i) % static_cast<uint64_t>(num_bins)));
+    const uint64_t j = permute_index(static_cast<uint64_t>(i), n, seed);
+    return mapper(static_cast<int>(j % static_cast<uint64_t>(num_bins)));
   }
 };
 
@@ -457,6 +522,8 @@ constexpr double kDefaultZipfExponent        = 1.0; // bare "zipf"
 constexpr double kDefaultHashSynonymHotShare = 0.9; // bare "hash_synonym"
 constexpr int kDefaultTemporalPhases         = 8;   // bare "temporal_phases"
 constexpr uint64_t kDefaultStridedStride     = 9973ull; // bare "strided_sweep"
+// bare "sawtooth" => period 0 sentinel, resolved to num_bins at generation time.
+constexpr uint64_t kDefaultSawtoothPeriod    = 0ull;
 
 // Build the per-bin pmf for an i.i.d. distribution shape, honoring the spec's
 // knob. Hot ranks are scattered across bins via scatter_bin() so the mode is
@@ -547,28 +614,6 @@ inline std::vector<double> build_pmf(const ShapeSpec& spec, int num_bins, uint64
       }
       break;
     }
-    case InputShape::capacity_cliff: {
-      // KNOB = active set as a multiple of cache slots. Default => slots+1
-      // (the just-over-capacity cliff). Equiprobable bins, spread across the
-      // array so they do not trivially share slots.
-      int k;
-      if (spec.has_knob)
-      {
-        k = static_cast<int>(std::lround(spec.knob * kAdversarialCacheSlots));
-      }
-      else
-      {
-        k = kAdversarialCacheSlots + 1;
-      }
-      k = std::max(1, std::min(k, num_bins));
-      const double p = 1.0 / k;
-      for (int j = 0; j < k; ++j)
-      {
-        const int b = static_cast<int>((static_cast<uint64_t>(j) * num_bins) / static_cast<uint64_t>(k));
-        pmf[b] = p;
-      }
-      break;
-    }
     default:
       throw std::runtime_error("build_pmf called with a non-distribution shape");
   }
@@ -578,7 +623,7 @@ inline std::vector<double> build_pmf(const ShapeSpec& spec, int num_bins, uint64
 inline bool is_ordering_shape(InputShape shape)
 {
   return shape == InputShape::stale_resident || shape == InputShape::temporal_phases
-      || shape == InputShape::strided_sweep;
+      || shape == InputShape::strided_sweep || shape == InputShape::sawtooth;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,11 +637,15 @@ generate_shape_impl(const ShapeSpec& spec, OffsetT n, int num_bins, Mapper mappe
   thrust::device_vector<SampleT> out(static_cast<std::size_t>(n));
   const uint64_t offset = seed % static_cast<uint64_t>(num_bins);
 
-  // Exact-uniform endpoint: emitted as equal-count tiling rather than i.i.d.
-  // sampling, so every bin gets exactly n/num_bins (+-1) -- truly uniform.
+  // Exact-uniform endpoint: every bin gets exactly n/num_bins (+-1) samples, in
+  // a pseudo-random sequence order (a Feistel permutation of the round-robin
+  // tiling). Uniform counts, randomly distributed in the input -- not the
+  // sequential ramp (that is the `sawtooth` shape). Emitted directly rather than
+  // via i.i.d. uniform sampling so the per-bin counts are exact (no multinomial
+  // noise / empty bins when bins ~= elements).
   if (spec.shape == InputShape::concentrated && spec.has_knob && spec.knob >= 1.0)
   {
-    uniform_tiling_functor<SampleT, Mapper> fn{num_bins, mapper};
+    shuffled_uniform_functor<SampleT, Mapper> fn{static_cast<uint64_t>(n), num_bins, seed, mapper};
     thrust::tabulate(out.begin(), out.end(), fn);
     return out;
   }
@@ -626,6 +675,17 @@ generate_shape_impl(const ShapeSpec& spec, OffsetT n, int num_bins, Mapper mappe
       const uint64_t stride =
         spec.has_knob ? static_cast<uint64_t>(std::llround(spec.knob)) : kDefaultStridedStride;
       strided_functor<SampleT, Mapper> fn{num_bins, stride, mapper};
+      thrust::tabulate(out.begin(), out.end(), fn);
+      break;
+    }
+    case InputShape::sawtooth: {
+      // KNOB = ramp period in bins; 0 (the default) means a full num_bins sweep.
+      const uint64_t requested =
+        spec.has_knob ? static_cast<uint64_t>(std::llround(spec.knob)) : kDefaultSawtoothPeriod;
+      const uint64_t period =
+        (requested == 0) ? static_cast<uint64_t>(num_bins)
+                         : std::min(requested, static_cast<uint64_t>(num_bins));
+      sawtooth_functor<SampleT, Mapper> fn{period, mapper};
       thrust::tabulate(out.begin(), out.end(), fn);
       break;
     }
