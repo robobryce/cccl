@@ -37,6 +37,16 @@ typedef struct cccl_device_histogram_build_result_t
   bool may_overflow;
   CUkernel init_kernel;
   CUkernel sweep_kernel;
+  // High-bin (privatized_smem_bins == 0) cooperative kernels. Null for the
+  // <=256-bin tier (which only launches sweep_kernel). The host dispatch reaches
+  // these through the histogram_kernel_source accessors when it takes the
+  // cooperative GMEM-privatized / direct-atomic path. gather_kernel is the
+  // atomic-free per-block GMEM-privatized gather (bins 257..65535);
+  // direct_cuckoo_kernel / direct_cuckoo_noprobe2_kernel are the direct-atomic
+  // cuckoo-cache kernels for the very-high-bin tiers (>=65536 / >=262144).
+  CUkernel gather_kernel;
+  CUkernel direct_cuckoo_kernel;
+  CUkernel direct_cuckoo_noprobe2_kernel;
   void* runtime_policy;
 } cccl_device_histogram_build_result_t;
 
