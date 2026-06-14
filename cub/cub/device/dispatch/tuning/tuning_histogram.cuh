@@ -412,7 +412,20 @@ struct histogram_policy
   // exposed here so the behavior is controlled in one place. Trailing + defaulted
   // so positional policy braces above (which stop at direct_atomic_threads) are
   // unaffected.
+  //
+  // The default honors a build-time override, `CUB_HISTO_FORCE_WARP_COALESCE`
+  // (1 = force on, 0 = force off), so a study/sweep can build a coalesce-off
+  // variant with `-DCUB_HISTO_FORCE_WARP_COALESCE=0` without editing source --
+  // mirroring the TUNE_* benchmark macros. Coalescing merges a warp's same-bin
+  // lanes into one atomic: a large win on low-entropy / colliding inputs but pure
+  // `__match_any_sync` overhead on high-entropy / scattered inputs (where it
+  // merges nothing yet still pays the warp-collective latency). Unset (the normal
+  // build) leaves it on.
+#ifdef CUB_HISTO_FORCE_WARP_COALESCE
+  bool warp_coalesce = (CUB_HISTO_FORCE_WARP_COALESCE != 0);
+#else
   bool warp_coalesce = true;
+#endif
 
   // Resolved direct-atomic thread count: the override when set, else the sweep
   // thread count. Used by both the host dispatch launch and the direct-atomic
