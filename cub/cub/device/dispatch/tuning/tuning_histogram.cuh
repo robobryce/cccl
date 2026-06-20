@@ -406,6 +406,34 @@ struct histogram_policy
   // same policy.
   int direct_atomic_threads_per_block = 0;
 
+  // Compile-time thread count for the STATIC <=256-bin SMEM-privatized kernel (the
+  // fixed-`__shared__`-array kernel the selector runs at `max_privatized_smem_bins`
+  // and below). 0 means "inherit `threads_per_block`". UNLIKE
+  // `direct_atomic_threads_per_block`, this is NOT a free runtime launch knob: the
+  // SMEM-priv SWEEP kernel is tile-based (its `AgentHistogram` builds a
+  // `BlockLoad<.., BLOCK_THREADS, ..>` that requires the launch thread count to equal
+  // the compile-time `BLOCK_THREADS`), so this override is consumed at COMPILE TIME
+  // inside `DeviceHistogramSmemPrivatizedKernel` (gated on `PrivatizedSmemBins ==
+  // max_privatized_smem_bins`) to size BOTH the agent policy and `__launch_bounds__`,
+  // and the host launch resolves the SAME value for the static tier so block dim ==
+  // kernel BLOCK_THREADS. The static <=256 kernel and the dynamic-SMEM kernel
+  // (bins 1024..cap) share ONE policy; the sweep width tuned for the dynamic mid-bin
+  // tiers can be too wide for the tiny static tier (a RANGE per-sample SearchTransform
+  // is latency-bound there), so this lets a policy narrow JUST the static tier without
+  // disturbing the dynamic sweep or the direct-atomic path. Trailing + defaulted so
+  // positional braces stopping at `direct_atomic_threads_per_block` are unaffected.
+  int static_smem_threads_per_block = 0;
+
+  // Compile-time items-per-thread for the STATIC <=256-bin SMEM-privatized kernel.
+  // 0 means "inherit `pixels_per_thread`". Same rationale and constraints as
+  // `static_smem_threads_per_block`: the static tier shares ONE policy with the
+  // dynamic-SMEM kernel, but the dynamic tier's items-per-thread can differ from what
+  // the tiny static tier wants. Consumed at COMPILE TIME in
+  // `DeviceHistogramSmemPrivatizedKernel`, and the host launch resolves the SAME value
+  // for the static tier so `pixels_per_tile` (hence the grid) matches the kernel's
+  // tile. Trailing + defaulted so positional braces are unaffected.
+  int static_smem_items_per_block = 0;
+
   // Whether the GMEM-privatized / direct-atomic paths coalesce a warp's same-bin
   // lanes into one atomic (the dual of `rle_compress`; see warp_coalesce_atomic).
   // On by default -- the contention win on the hot-bin direct-atomic path;
@@ -435,6 +463,24 @@ struct histogram_policy
     return direct_atomic_threads_per_block != 0 ? direct_atomic_threads_per_block : threads_per_block;
   }
 
+  // Resolved thread count for the STATIC <=256-bin SMEM-privatized kernel: the
+  // override when set, else the sweep thread count. The kernel-side compile-time
+  // selection and the host-side static-tier launch MUST use this identical logic so
+  // the launch block dim equals the kernel's compile-time BLOCK_THREADS.
+  [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr int static_smem_threads() const
+  {
+    return static_smem_threads_per_block != 0 ? static_smem_threads_per_block : threads_per_block;
+  }
+
+  // Resolved items-per-thread for the STATIC <=256-bin SMEM-privatized kernel: the
+  // override when set, else the sweep items-per-thread. The kernel-side compile-time
+  // selection and the host-side static-tier launch MUST use this identical logic so
+  // the launch's pixels_per_tile matches the kernel's compile-time tile.
+  [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr int static_smem_items() const
+  {
+    return static_smem_items_per_block != 0 ? static_smem_items_per_block : pixels_per_thread;
+  }
+
   [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr friend bool
   operator==(const histogram_policy& lhs, const histogram_policy& rhs)
   {
@@ -445,6 +491,8 @@ struct histogram_policy
         && lhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
              == rhs.pdl_trigger_next_launch_in_init_kernel_max_bin_count
         && lhs.direct_atomic_threads_per_block == rhs.direct_atomic_threads_per_block
+        && lhs.static_smem_threads_per_block == rhs.static_smem_threads_per_block
+        && lhs.static_smem_items_per_block == rhs.static_smem_items_per_block
         && lhs.warp_coalesce == rhs.warp_coalesce;
   }
 
@@ -465,6 +513,8 @@ struct histogram_policy
         << ", .vec_size = " << p.vec_size << ", .pdl_trigger_next_launch_in_init_kernel_max_bin_count = "
         << p.pdl_trigger_next_launch_in_init_kernel_max_bin_count
         << ", .direct_atomic_threads_per_block = " << p.direct_atomic_threads_per_block
+        << ", .static_smem_threads_per_block = " << p.static_smem_threads_per_block
+        << ", .static_smem_items_per_block = " << p.static_smem_items_per_block
         << ", .warp_coalesce = " << p.warp_coalesce << " }";
   }
 #endif // _CCCL_HOSTED()
@@ -553,11 +603,29 @@ public:
           // has one SearchTransform and a larger cache, making it more
           // throughput-bound, so the per-transform decouple is per-channel-count.
           //
-          // The sweep tiers keep the 768-thread shape (SMEM-priv occupancy-bound,
-          // not direct-atomic latency-bound). EVEN inherits its sweep thread count
-          // (override stays 0): its cheap ScaleTransform makes the high-bin
-          // direct-atomic cells throughput-bound, where the wider block is fine.
-          return histogram_policy{768, t_scale(12), BLOCK_LOAD_DIRECT, LOAD_LDG, true, SMEM, false, 1 << 2, 2048, 512};
+          // The dynamic-SMEM sweep tiers (bins 1024..cap) keep the 768-thread shape
+          // (SMEM-priv occupancy-bound, not latency-bound) -- they win 2.8-4.4x there.
+          // EVEN inherits its sweep thread count (both overrides stay 0): its cheap
+          // ScaleTransform makes the high-bin direct-atomic cells throughput-bound,
+          // where the wider block is fine, and its static <=256 tier never regressed.
+          //
+          // static_smem_{threads,items}_per_block = {384, t_scale(16)}: the STATIC
+          // <=256-bin SMEM-priv kernel is a SEPARATE instantiation from the dynamic
+          // sweep and is the only kernel the selector runs at bins <=
+          // max_privatized_smem_bins. The 768-thread / t_scale(12)-ipt shape tuned for
+          // the dynamic mid-bin tiers regresses the tiny static tier vs upstream main
+          // (which runs this cell at its SM50 fallback {384, t_scale(16)}). The dominant
+          // cost was NOT the launch shape but the SearchTransform MRU bracket cache in
+          // the SMEM accumulate loop (extra live register state lowering occupancy on
+          // this register-bound kernel) -- now gated off for the static tier in
+          // agent_histogram.cuh (kept on for the dynamic tier, where it pays off). With
+          // the MRU gated off, restoring the static tier's launch shape to main's {384,
+          // t_scale(16)} via these two overrides recovers the rest. The dynamic sweep
+          // (768 / t_scale(12)) and the direct-atomic path (512) are unchanged; EVEN
+          // (both overrides 0) is untouched. Consumed at compile time in the static
+          // kernel (see histogram_policy::static_smem_{threads,items}).
+          return histogram_policy{
+            768, t_scale(12), BLOCK_LOAD_DIRECT, LOAD_LDG, true, SMEM, false, 1 << 2, 2048, 512, 384, t_scale(16)};
         }
       }
 
