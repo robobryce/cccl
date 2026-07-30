@@ -1137,7 +1137,7 @@ CUB_RUNTIME_FUNCTION static cudaError_t dispatch_range(
     if (should_use_dynamic_smem<false>(
           active_policy, max_num_output_bins, int{kernel_source.CounterSize()}, NUM_ACTIVE_CHANNELS))
     {
-      using PrivatizedDecodeOpT = typename TransformsT::template CachedSearchTransform<const LevelT*>;
+      using PrivatizedDecodeOpT = typename TransformsT::template DynamicSearchTransform<const LevelT*>;
       ::cuda::std::array<PrivatizedDecodeOpT, NUM_ACTIVE_CHANNELS> privatized_decode_op{};
       for (int channel = 0; channel < NUM_ACTIVE_CHANNELS; ++channel)
       {

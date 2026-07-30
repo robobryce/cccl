@@ -384,6 +384,74 @@ struct Transforms
     }
   };
 
+  //! @brief Selects the RANGE bin-selection algorithm from the runtime bin count.
+  template <typename LevelIteratorT>
+  struct DynamicSearchTransform
+  {
+    using SearchTransformT       = SearchTransform<LevelIteratorT>;
+    using CachedSearchTransformT = CachedSearchTransform<LevelIteratorT>;
+
+    struct BinSelectState
+    {
+      typename SearchTransformT::BinSelectState search;
+      typename CachedSearchTransformT::BinSelectState cached;
+    };
+
+    SearchTransformT search;
+    CachedSearchTransformT cached;
+    int num_output_levels;
+    int cached_search_min_bins;
+
+    _CCCL_HOST_DEVICE _CCCL_FORCEINLINE void Init(LevelIteratorT d_levels, int num_levels, int cached_search_min_bins_)
+    {
+      search.Init(d_levels, num_levels);
+      cached.Init(d_levels, num_levels, cached_search_min_bins_);
+      num_output_levels      = num_levels;
+      cached_search_min_bins = cached_search_min_bins_;
+    }
+
+    _CCCL_DEVICE _CCCL_FORCEINLINE void PrecomputeOnDevice()
+    {
+      if (use_cached_search())
+      {
+        cached.PrecomputeOnDevice();
+      }
+    }
+
+    template <CacheLoadModifier LoadModifier, typename SampleT2>
+    _CCCL_HOST_DEVICE _CCCL_FORCEINLINE void BinSelect(SampleT2 sample, int& bin, bool valid) const
+    {
+      if (use_cached_search())
+      {
+        cached.template BinSelect<LoadModifier>(sample, bin, valid);
+      }
+      else
+      {
+        search.template BinSelect<LoadModifier>(sample, bin, valid);
+      }
+    }
+
+    template <CacheLoadModifier LoadModifier, typename SampleT2>
+    _CCCL_HOST_DEVICE _CCCL_FORCEINLINE void
+    BinSelect(SampleT2 sample, int& bin, bool valid, BinSelectState& state) const
+    {
+      if (use_cached_search())
+      {
+        cached.template BinSelect<LoadModifier>(sample, bin, valid, state.cached);
+      }
+      else
+      {
+        search.template BinSelect<LoadModifier>(sample, bin, valid, state.search);
+      }
+    }
+
+  private:
+    [[nodiscard]] _CCCL_HOST_DEVICE_API constexpr bool use_cached_search() const
+    {
+      return cached_search_min_bins > 0 && num_output_levels - 1 >= cached_search_min_bins;
+    }
+  };
+
   // Scales samples to evenly-spaced bins
   struct ScaleTransform
   {
