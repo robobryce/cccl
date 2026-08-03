@@ -1,0 +1,70 @@
+{
+  "c32": {
+    "ok": true,
+    "errors": [],
+    "counts": {
+      "even": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      },
+      "range": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      },
+      "multi_even": {
+        "main": 1260,
+        "smem_static": 720,
+        "smem_cooperative_static": 720,
+        "smem_dynamic": 840,
+        "smem_cooperative_dynamic": 840
+      },
+      "multi_range": {
+        "main": 1260,
+        "smem_static": 720,
+        "smem_cooperative_static": 720,
+        "smem_dynamic": 840,
+        "smem_cooperative_dynamic": 840
+      }
+    }
+  },
+  "u64": {
+    "ok": true,
+    "errors": [],
+    "counts": {
+      "even": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      },
+      "range": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      },
+      "multi_even": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      },
+      "multi_range": {
+        "main": 1260,
+        "smem_static": 1080,
+        "smem_cooperative_static": 1080,
+        "smem_dynamic": 1260,
+        "smem_cooperative_dynamic": 1260
+      }
+    }
+  }
+}

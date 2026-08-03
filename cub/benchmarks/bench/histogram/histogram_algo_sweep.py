@@ -145,7 +145,12 @@ FORCED_HIGH_BIN_ALGOS = (
     + _COALESCE_AFFECTED
     + [a + "__nocoal" for a in _COALESCE_AFFECTED]
 )
-FORCED_LOW_BIN_ALGOS = ["smem_static", "smem_dynamic"]
+FORCED_LOW_BIN_ALGOS = [
+    "smem_static",
+    "smem_cooperative_static",
+    "smem_dynamic",
+    "smem_cooperative_dynamic",
+]
 FORCED_ALGOS = (
     [""] + FORCED_HIGH_BIN_ALGOS + FORCED_LOW_BIN_ALGOS
 )  # "" == default (selector)
@@ -165,6 +170,10 @@ ALGORITHM_NAMES = {
     "HYB": "hybrid",
     "DAS": "direct_single_probe",
     "DAC": "direct_cuckoo",
+    "SST": "smem_static",
+    "CST": "smem_cooperative_static",
+    "SDY": "smem_dynamic",
+    "CDY": "smem_cooperative_dynamic",
 }
 
 
@@ -193,7 +202,9 @@ EXPECTED_RAN = {
     "gmem_privatized_nocache": "gmem_privatized_nocache_cooperative",
     "gmem_privatized_agent": "gmem_privatized_nocache",
     "smem_static": "smem_privatized:static",
+    "smem_cooperative_static": "smem_privatized:cooperative_static",
     "smem_dynamic": "smem_privatized:dynamic",
+    "smem_cooperative_dynamic": "smem_privatized:cooperative_dynamic",
 }
 
 # The static privatized-SMEM kernel is compile-time sized for this many bins
@@ -241,9 +252,9 @@ def _forced_algo_applicable(akey: str, bins: int, multichannel: bool) -> bool:
       - hybrid      : needs a non-empty GMEM secondary tail (bins > HYBRID_MIN_BINS) and
         is single-channel only.
       - everything else (gmem-priv / direct-atomic): valid across the high-bin tier."""
-    if akey == "smem_static":
+    if akey in ("smem_static", "smem_cooperative_static"):
         return bins <= MAX_STATIC_BINS
-    if akey == "smem_dynamic":
+    if akey in ("smem_dynamic", "smem_cooperative_dynamic"):
         return True
     if akey == "hybrid":
         return (not multichannel) and bins > HYBRID_MIN_BINS
@@ -269,6 +280,11 @@ def algos_for_bin(bins: int) -> list:
     algos = [""] if INCLUDE_DEFAULT else []
     if bins <= MAX_STATIC_BINS:
         algos += FORCED_LOW_BIN_ALGOS
+    elif FORCED_ALGO_FILTER is not None:
+        # An explicit low-bin-family request is authoritative above the static
+        # tier too: dynamic SMEM remains structurally valid (for example at 512
+        # bins), while `_forced_algo_applicable` filters the static variants.
+        algos += [algo for algo in FORCED_LOW_BIN_ALGOS if algo in FORCED_ALGO_FILTER]
     # An explicit forced-algorithm request is authoritative even below the
     # historical sweep-scope floor. This matters when the compiled selector's
     # SMEM boundary is lower for a particular family (multi-RANGE is already
@@ -347,6 +363,11 @@ def query_cache_slots_for_cell(
     if key in _CACHE_SLOT_QUERY_RESULTS:
         return _CACHE_SLOT_QUERY_RESULTS[key]
 
+    # Slot sizing is a property of the compiled policy, counter/sample types,
+    # channel count, and device occupancy. It does not depend on the benchmark
+    # input extent. Probe with a small allocation so very large characterization
+    # cells cannot fail the metadata query before their real measured run.
+    probe_elements = min(elements, 1 << 20)
     cmd = [
         str(branch_bin),
         "--benchmark",
@@ -356,7 +377,7 @@ def query_cache_slots_for_cell(
         "--axis",
         f"SampleT{{ct}}={sample}",
         "--axis",
-        f"Elements{{io}}={elements}",
+        f"Elements{{io}}={probe_elements}",
         "--axis",
         "Bins=32",
         "--axis",
@@ -434,9 +455,9 @@ def run_cell(
     env["CUB_HISTO_INPUT_CACHE_SLOTS"] = str(cache_slots)
     env.pop("CUB_HISTO_FORCE_ALGO", None)
     env.pop("CUB_HISTO_FORCE_SMEM", None)
-    if algo_env in ("smem_static", "smem_dynamic"):
+    if algo_env in FORCED_LOW_BIN_ALGOS:
         # Low-bin static-vs-dynamic privatized-SMEM comparison: routed via FORCE_SMEM.
-        env["CUB_HISTO_FORCE_SMEM"] = algo_env[len("smem_") :]  # "static" / "dynamic"
+        env["CUB_HISTO_FORCE_SMEM"] = algo_env[len("smem_") :]
     elif algo_env:
         env["CUB_HISTO_FORCE_ALGO"] = algo_env
     # NVBench rejects range syntax for a single string-axis value, so always pass

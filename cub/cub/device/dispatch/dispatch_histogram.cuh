@@ -404,6 +404,22 @@ struct DeviceHistogramKernelSource
       OutputCounterT>;
   }
 
+  template <typename PolicyT, int PRIVATIZED_SMEM_BINS, typename PrivatizedDecodeOpT, typename OutputDecodeOpT>
+  _CCCL_HIDE_FROM_ABI CUB_RUNTIME_FUNCTION static constexpr auto HistogramSmemPrivatizedCooperativeKernel()
+  {
+    return &DeviceHistogramSmemPrivatizedCooperativeKernel<
+      PolicyT,
+      PRIVATIZED_SMEM_BINS,
+      NUM_CHANNELS,
+      NUM_ACTIVE_CHANNELS,
+      SampleIteratorT,
+      CounterT,
+      PrivatizedDecodeOpT,
+      OutputDecodeOpT,
+      OffsetT,
+      OutputCounterT>;
+  }
+
   /// Host-init dynamic-SMEM, NON-staging variant: merges each block's dyn-SMEM
   /// privatized histogram directly into the global output via atomicAdd
   /// (no staging slabs, no combine kernel). Host must launch the init kernel first.
@@ -411,6 +427,22 @@ struct DeviceHistogramKernelSource
   _CCCL_HIDE_FROM_ABI CUB_RUNTIME_FUNCTION static constexpr auto HistogramSmemPrivatizedDynamicKernel()
   {
     return &DeviceHistogramSmemPrivatizedDynamicKernel<
+      PolicyT,
+      PRIVATIZED_SMEM_BINS,
+      NUM_CHANNELS,
+      NUM_ACTIVE_CHANNELS,
+      SampleIteratorT,
+      CounterT,
+      PrivatizedDecodeOpT,
+      OutputDecodeOpT,
+      OffsetT,
+      OutputCounterT>;
+  }
+
+  template <typename PolicyT, int PRIVATIZED_SMEM_BINS, typename PrivatizedDecodeOpT, typename OutputDecodeOpT>
+  _CCCL_HIDE_FROM_ABI CUB_RUNTIME_FUNCTION static constexpr auto HistogramSmemPrivatizedDynamicCooperativeKernel()
+  {
+    return &DeviceHistogramSmemPrivatizedDynamicCooperativeKernel<
       PolicyT,
       PRIVATIZED_SMEM_BINS,
       NUM_CHANNELS,
@@ -646,7 +678,7 @@ query_direct_atomic_cache_slots(KernelSource kernel_source = {}, KernelLauncherF
     return slots_floor;
   }
   using policy_selector_t = policy_selector_from_types<SampleT, CounterT, NUM_CHANNELS, NUM_ACTIVE_CHANNELS, IsEven>;
-  const histogram_policy active_policy      = policy_selector_t{}(cc);
+  const HistogramPolicy active_policy       = policy_selector_t{}(cc);
   const int direct_atomic_threads_per_block = active_policy.direct_atomic_threads();
 
   // Decode-op types for the direct-atomic (PRIVATIZED_SMEM_BINS==0, non-byte) path,
@@ -870,6 +902,17 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   // (the on-chip CAPACITY is a runtime byte budget, not this value).
   static constexpr bool kUseDynamicSmem = (PRIVATIZED_SMEM_BINS == kDynamicSmemKernelTagBins);
 
+  bool use_cooperative_smem = false;
+#if _CCCL_HOSTED()
+  NV_IF_TARGET(NV_IS_HOST, ({
+                 if (const char* env = ::std::getenv("CUB_HISTO_FORCE_SMEM"))
+                 {
+                   use_cooperative_smem =
+                     (::std::strcmp(env, "cooperative_static") == 0 || ::std::strcmp(env, "cooperative_dynamic") == 0);
+                 }
+               }));
+#endif // _CCCL_HOSTED()
+
   // The dynamic-SMEM kernel merges each block's privatized histogram directly
   // into the global output via per-block atomicAdd (StoreOutput): at these bin
   // counts the cross-block contention is spread over enough distinct bins that a
@@ -897,6 +940,28 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
                                                                   output_decode_op_t>();
     }
   }();
+
+  auto cooperative_sweep_kernel = [&] {
+    using output_decode_op_t     = typename FirstLevelArrayT::value_type;
+    using privatized_decode_op_t = typename SecondLevelArrayT::value_type;
+    if constexpr (kUseDynamicSmem)
+    {
+      return kernel_source.template HistogramSmemPrivatizedDynamicCooperativeKernel<
+        PolicySelector,
+        PRIVATIZED_SMEM_BINS,
+        privatized_decode_op_t,
+        output_decode_op_t>();
+    }
+    else
+    {
+      return kernel_source.template HistogramSmemPrivatizedCooperativeKernel<
+        PolicySelector,
+        PRIVATIZED_SMEM_BINS,
+        privatized_decode_op_t,
+        output_decode_op_t>();
+    }
+  }();
+  const auto occupancy_kernel = use_cooperative_smem ? cooperative_sweep_kernel : sweep_kernel;
 
   // SMEM-priv sweep block size. The STATIC <=256 tier (this is the non-dynamic,
   // PRIVATIZED_SMEM_BINS>0 instantiation -- the dynamic tier is kUseDynamicSmem and the
@@ -949,12 +1014,12 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   {
     // Raise the kernel's max-dynamic-SMEM cap so the occupancy query accounts for the dyn-SMEM
     // CTA footprint. (The cap also has to be raised before the actual launch below.)
-    if (const auto error = CubDebug(launcher_factory.set_max_dynamic_smem_size_for(sweep_kernel, dyn_smem_bytes)))
+    if (const auto error = CubDebug(launcher_factory.set_max_dynamic_smem_size_for(occupancy_kernel, dyn_smem_bytes)))
     {
       return error;
     }
     if (const auto error = CubDebug(launcher_factory.MaxSmOccupancy(
-          histogram_sweep_sm_occupancy, sweep_kernel, threads_per_block, dyn_smem_bytes)))
+          histogram_sweep_sm_occupancy, occupancy_kernel, threads_per_block, dyn_smem_bytes)))
     {
       return error;
     }
@@ -962,7 +1027,7 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   else
   {
     if (const auto error =
-          CubDebug(launcher_factory.MaxSmOccupancy(histogram_sweep_sm_occupancy, sweep_kernel, threads_per_block)))
+          CubDebug(launcher_factory.MaxSmOccupancy(histogram_sweep_sm_occupancy, occupancy_kernel, threads_per_block)))
     {
       return error;
     }
@@ -1970,6 +2035,60 @@ CUB_RUNTIME_FUNCTION _CCCL_VISIBILITY_HIDDEN _CCCL_FORCEINLINE auto dispatch(
   }
 #endif // _CCCL_HOSTED()
 
+#if _CCCL_HOSTED()
+  if (use_cooperative_smem && !launched_persistent && blocks_per_row > 0 && blocks_per_col > 0)
+  {
+    NV_IF_TARGET(NV_IS_HOST, ({
+                   int device_ordinal        = 0;
+                   int cooperative_supported = 0;
+                   if (cudaGetDevice(&device_ordinal) != cudaSuccess
+                       || cudaDeviceGetAttribute(&cooperative_supported, cudaDevAttrCooperativeLaunch, device_ordinal)
+                            != cudaSuccess
+                       || cooperative_supported == 0)
+                   {
+                     (void) cudaGetLastError();
+                     return cudaErrorNotSupported;
+                   }
+
+                   dim3 cooperative_grid_dims{static_cast<unsigned int>(num_thread_blocks), 1u, 1u};
+                   void* kernel_args[] = {
+                     const_cast<void*>(static_cast<const void*>(&d_samples)),
+                     const_cast<void*>(static_cast<const void*>(&num_output_bins_wrapper)),
+                     const_cast<void*>(static_cast<const void*>(&num_privatized_bins_wrapper)),
+                     const_cast<void*>(static_cast<const void*>(&d_output_histograms)),
+                     const_cast<void*>(static_cast<const void*>(&d_privatized_histograms_wrapper)),
+                     const_cast<void*>(static_cast<const void*>(&first_level_array)),
+                     const_cast<void*>(static_cast<const void*>(&second_level_array)),
+                     const_cast<void*>(static_cast<const void*>(&num_row_pixels)),
+                     const_cast<void*>(static_cast<const void*>(&num_rows)),
+                     const_cast<void*>(static_cast<const void*>(&row_stride_samples)),
+                     const_cast<void*>(static_cast<const void*>(&tiles_per_row)),
+                     const_cast<void*>(static_cast<const void*>(&tile_queue))};
+                   const cudaError_t cooperative_status = cudaLaunchCooperativeKernel(
+                     reinterpret_cast<const void*>(cooperative_sweep_kernel),
+                     cooperative_grid_dims,
+                     dim3{static_cast<unsigned int>(threads_per_block)},
+                     kernel_args,
+                     kUseDynamicSmem ? dyn_smem_bytes : 0,
+                     stream);
+                   if (cooperative_status != cudaSuccess)
+                   {
+                     (void) cudaGetLastError();
+                     return cudaErrorNotSupported;
+                   }
+                   launched_persistent = true;
+                   if (::std::getenv("CUB_HISTO_LOG_LAUNCH"))
+                   {
+                     ::std::fprintf(stderr,
+                                    "[launch] bins=%d ch=%d ran=smem_privatized:cooperative_%s\n",
+                                    max_num_output_bins,
+                                    NUM_ACTIVE_CHANNELS,
+                                    kUseDynamicSmem ? "dynamic" : "static");
+                   }
+                 }));
+  }
+#endif // _CCCL_HOSTED()
+
   // For the high-bin path (PRIVATIZED_SMEM_BINS == 0: GMEM-privatized gather and the
   // direct-atomic caches) the ONLY correct kernel is the cooperative one launched
   // above -- it relies on a grid-wide `grid.sync()` to order init -> sweep -> gather.
@@ -2290,9 +2409,9 @@ CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_gmem_privatized_hybr
     return cudaErrorNotSupported;
   }
 
-  const histogram_policy active_policy = policy_selector(cc);
-  const int threads_per_block          = active_policy.threads_per_block;
-  const int pixels_per_thread          = active_policy.pixels_per_thread;
+  const HistogramPolicy active_policy = policy_selector(cc);
+  const int threads_per_block         = active_policy.threads_per_block;
+  const int pixels_per_thread         = active_policy.pixels_per_thread;
 
   int sm_count = 0;
   if (const auto error = CubDebug(launcher_factory.MultiProcessorCount(sm_count)))
@@ -2724,21 +2843,26 @@ CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_by_algorithm(
   // sweep can measure static vs dynamic at the SAME (low) bin count -- used to decide
   // whether the dynamic kernel can replace the static one. 0 = no override (bin-count
   // rule stands). Host-only; zero device SASS.
-  int force_smem_kind = 0; // 0 = auto, 1 = force static, 2 = force dynamic
+  int force_smem_kind = 0; // 0 = auto, 1/2 = noncoop static/dynamic, 3/4 = cooperative static/dynamic
 #if _CCCL_HOSTED()
-  NV_IF_TARGET(
-    NV_IS_HOST, ({
-      if (const char* env = ::std::getenv("CUB_HISTO_FORCE_ALGO"))
-      {
-        force_hybrid_member = (::std::strcmp(env, "hybrid") == 0);
-        force_gather_member =
-          (::std::strcmp(env, "gmem_privatized_nocache") == 0 || ::std::strcmp(env, "gmem_priv_gather") == 0);
-      }
-      if (const char* env = ::std::getenv("CUB_HISTO_FORCE_SMEM"))
-      {
-        force_smem_kind = (::std::strcmp(env, "static") == 0) ? 1 : (::std::strcmp(env, "dynamic") == 0) ? 2 : 0;
-      }
-    }));
+  NV_IF_TARGET(NV_IS_HOST, ({
+                 if (const char* env = ::std::getenv("CUB_HISTO_FORCE_ALGO"))
+                 {
+                   force_hybrid_member = (::std::strcmp(env, "hybrid") == 0);
+                   force_gather_member = (::std::strcmp(env, "gmem_privatized_nocache") == 0
+                                          || ::std::strcmp(env, "gmem_priv_gather") == 0);
+                 }
+                 if (const char* env = ::std::getenv("CUB_HISTO_FORCE_SMEM"))
+                 {
+                   force_smem_kind =
+                     (::std::strcmp(env, "static") == 0)               ? 1
+                     : (::std::strcmp(env, "dynamic") == 0)            ? 2
+                     : (::std::strcmp(env, "cooperative_static") == 0) ? 3
+                     : (::std::strcmp(env, "cooperative_dynamic") == 0)
+                       ? 4
+                       : 0;
+                 }
+               }));
 #endif // _CCCL_HOSTED()
 
   switch (algo)
@@ -2768,8 +2892,8 @@ CUB_RUNTIME_FUNCTION _CCCL_FORCEINLINE cudaError_t dispatch_by_algorithm(
       // which is both correct and the measured-faster path there.
       const bool counter_prefers_static = (sizeof(LocalCounterT) <= 4);
       const bool use_static_smem =
-        (force_smem_kind == 2) ? false
-        : (force_smem_kind == 1)
+        (force_smem_kind == 2 || force_smem_kind == 4) ? false
+        : (force_smem_kind == 1 || force_smem_kind == 3)
           ? true
           : (counter_prefers_static && max_num_output_bins <= max_privatized_smem_bins);
       if (use_static_smem)

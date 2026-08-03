@@ -1664,6 +1664,110 @@ __launch_bounds__(int(PrivatizedSmemBins > 0 ? current_policy<PolicySelector>().
 //!
 //! Phase 3 (block-local): each block runs the standard `AgentHistogram`
 //! pipeline (`InitBinCounters`, `ConsumeTiles`, `StoreOutput`).
+template <typename PolicySelector,
+          int PrivatizedSmemBins,
+          int NumChannels,
+          int NumActiveChannels,
+          typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT,
+          typename OutputCounterT = CounterT>
+#if _CCCL_HAS_CONCEPTS()
+  requires histogram_policy_selector<PolicySelector>
+#endif // _CCCL_HAS_CONCEPTS()
+__launch_bounds__(
+  int(PrivatizedSmemBins > 0 ? current_policy<PolicySelector>().static_smem_threads()
+                             : current_policy<PolicySelector>().threads_per_block),
+  (PrivatizedSmemBins > 0 && PrivatizedDecodeOpT::is_range_transform
+   && current_policy<PolicySelector>().static_smem_threads() < 512)
+    ? 3
+    : (((PrivatizedSmemBins > 0 ? current_policy<PolicySelector>().static_smem_threads()
+                                : current_policy<PolicySelector>().threads_per_block)
+        >= 512)
+         ? 2
+         : 0))
+  _CCCL_KERNEL_ATTRIBUTES void DeviceHistogramSmemPrivatizedCooperativeKernel(
+    const SampleIteratorT d_samples,
+    const ::cuda::std::array<int, NumActiveChannels> num_output_bins_wrapper,
+    const ::cuda::std::array<int, NumActiveChannels> num_privatized_bins_wrapper,
+    ::cuda::std::array<OutputCounterT*, NumActiveChannels> d_output_histograms_wrapper,
+    ::cuda::std::array<CounterT*, NumActiveChannels> d_privatized_histograms_wrapper,
+    const ::cuda::std::array<OutputDecodeOpT, NumActiveChannels> output_decode_op_wrapper,
+    const ::cuda::std::array<PrivatizedDecodeOpT, NumActiveChannels> privatized_decode_op_wrapper,
+    const OffsetT num_row_pixels,
+    const OffsetT num_rows,
+    const OffsetT row_stride_samples,
+    const int tiles_per_row,
+    GridQueue<int> tile_queue)
+{
+  static constexpr HistogramPolicy hp = current_policy<PolicySelector>();
+  static constexpr int kSweepThreads  = (PrivatizedSmemBins > 0) ? hp.static_smem_threads() : hp.threads_per_block;
+  static constexpr int kSweepItems    = (PrivatizedSmemBins > 0) ? hp.static_smem_items() : hp.pixels_per_thread;
+
+  namespace cg        = ::cooperative_groups;
+  cg::grid_group grid = cg::this_grid();
+
+  const unsigned int block_id     = (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+  const unsigned int thread_id    = block_id * blockDim.x + threadIdx.x;
+  const unsigned int grid_threads = gridDim.x * gridDim.y * gridDim.z * blockDim.x;
+
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int channel = 0; channel < NumActiveChannels; ++channel)
+  {
+    const unsigned int channel_bins = static_cast<unsigned int>(num_output_bins_wrapper[channel]);
+    for (unsigned int bin = thread_id; bin < channel_bins; bin += grid_threads)
+    {
+      d_output_histograms_wrapper[channel][bin] = OutputCounterT{};
+    }
+  }
+  if (thread_id == 0)
+  {
+    tile_queue.ResetDrain();
+  }
+  grid.sync();
+
+  using AgentHistogramPolicyT = agent_histogram_policy<
+    kSweepThreads,
+    kSweepItems,
+    hp.load_algorithm,
+    hp.load_modifier,
+    hp.rle_compress,
+    hp.mem_preference,
+    hp.use_work_stealing,
+    hp.vec_size,
+    hp.warp_coalesce>;
+  using AgentHistogramT =
+    AgentHistogram<AgentHistogramPolicyT,
+                   PrivatizedSmemBins,
+                   NumChannels,
+                   NumActiveChannels,
+                   SampleIteratorT,
+                   CounterT,
+                   PrivatizedDecodeOpT,
+                   OutputDecodeOpT,
+                   OffsetT,
+                   /* UseDynamicSmemHistogram = */ false,
+                   OutputCounterT>;
+
+  __shared__ typename AgentHistogramT::TempStorage temp_storage;
+  AgentHistogramT agent(
+    temp_storage,
+    d_samples,
+    num_output_bins_wrapper.data(),
+    num_privatized_bins_wrapper.data(),
+    d_output_histograms_wrapper.data(),
+    d_privatized_histograms_wrapper.data(),
+    output_decode_op_wrapper.data(),
+    privatized_decode_op_wrapper.data());
+
+  agent.InitBinCounters();
+  agent.ConsumeTiles(num_row_pixels, num_rows, row_stride_samples, tiles_per_row, tile_queue);
+  agent.StoreOutput();
+  _CCCL_PDL_TRIGGER_NEXT_LAUNCH();
+}
+
 //! Unified GMEM-privatized histogram sweep kernel — the design doc's
 //! `GmemPrivatizedKernel<NoCache, smem_split>`, merging what used to be two
 //! separate kernels:
@@ -1766,7 +1870,7 @@ __launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), Hybri
     _CCCL_GRID_CONSTANT const int smem_split                                        = 0,
     _CCCL_GRID_CONSTANT const int secondary_size                                    = 0)
 {
-  static constexpr histogram_policy hp = current_policy<PolicySelector>();
+  static constexpr HistogramPolicy hp = current_policy<PolicySelector>();
 
   namespace cg        = ::cooperative_groups;
   cg::grid_group grid = cg::this_grid();
@@ -1776,14 +1880,14 @@ __launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), Hybri
   const unsigned int tid_global      = block_id * blockDim.x + threadIdx.x;
   const unsigned int total_threads   = blocks_per_grid * blockDim.x;
 
-  using AgentHistogramPolicyT = AgentHistogramPolicy<
+  using AgentHistogramPolicyT = agent_histogram_policy<
     hp.threads_per_block,
     hp.pixels_per_thread,
     hp.load_algorithm,
     hp.load_modifier,
     hp.rle_compress,
     hp.mem_preference,
-    hp.work_stealing,
+    hp.use_work_stealing,
     hp.vec_size,
     hp.warp_coalesce>;
 
@@ -1931,7 +2035,7 @@ __launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), Hybri
     }
 
     // Drain-reset + grid.sync only when work stealing is enabled.
-    if constexpr (hp.work_stealing)
+    if constexpr (hp.use_work_stealing)
     {
       if (tid_global == 0)
       {
@@ -3257,16 +3361,16 @@ __launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), 2)
     _CCCL_GRID_CONSTANT const int tiles_per_row,
     GridQueue<int> tile_queue)
 {
-  static constexpr histogram_policy hp = current_policy<PolicySelector>();
+  static constexpr HistogramPolicy hp = current_policy<PolicySelector>();
 
-  using AgentHistogramPolicyT = AgentHistogramPolicy<
+  using AgentHistogramPolicyT = agent_histogram_policy<
     hp.threads_per_block,
     hp.pixels_per_thread,
     hp.load_algorithm,
     hp.load_modifier,
     hp.rle_compress,
     hp.mem_preference,
-    hp.work_stealing,
+    hp.use_work_stealing,
     hp.vec_size,
     hp.warp_coalesce>;
   using AgentHistogramT =
@@ -3319,6 +3423,117 @@ __launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), 2)
   // slab, no combine kernel).
   agent.StoreOutput();
 
+  _CCCL_PDL_TRIGGER_NEXT_LAUNCH();
+}
+
+//! Cooperative direct-output counterpart of
+//! `DeviceHistogramSmemPrivatizedDynamicKernel`. The grid first zeroes the
+//! output and resets the work queue, synchronizes, then runs the same dynamic
+//! per-block SMEM accumulation and device-scope atomic output merge.
+template <typename PolicySelector,
+          int PrivatizedSmemBins,
+          int NumChannels,
+          int NumActiveChannels,
+          typename SampleIteratorT,
+          typename CounterT,
+          typename PrivatizedDecodeOpT,
+          typename OutputDecodeOpT,
+          typename OffsetT,
+          typename OutputCounterT = CounterT>
+#if _CCCL_HAS_CONCEPTS()
+  requires histogram_policy_selector<PolicySelector>
+#endif // _CCCL_HAS_CONCEPTS()
+__launch_bounds__(int(current_policy<PolicySelector>().threads_per_block), 2)
+  _CCCL_KERNEL_ATTRIBUTES void DeviceHistogramSmemPrivatizedDynamicCooperativeKernel(
+    _CCCL_GRID_CONSTANT const SampleIteratorT d_samples,
+    _CCCL_GRID_CONSTANT const ::cuda::std::array<int, NumActiveChannels> num_output_bins_wrapper,
+    _CCCL_GRID_CONSTANT const ::cuda::std::array<int, NumActiveChannels> num_privatized_bins_wrapper,
+    ::cuda::std::array<OutputCounterT*, NumActiveChannels> d_output_histograms_wrapper,
+    ::cuda::std::array<CounterT*, NumActiveChannels> d_privatized_histograms_wrapper,
+    _CCCL_GRID_CONSTANT const ::cuda::std::array<OutputDecodeOpT, NumActiveChannels> output_decode_op_wrapper,
+    _CCCL_GRID_CONSTANT const ::cuda::std::array<PrivatizedDecodeOpT, NumActiveChannels> privatized_decode_op_wrapper,
+    _CCCL_GRID_CONSTANT const OffsetT num_row_pixels,
+    _CCCL_GRID_CONSTANT const OffsetT num_rows,
+    _CCCL_GRID_CONSTANT const OffsetT row_stride_samples,
+    _CCCL_GRID_CONSTANT const int tiles_per_row,
+    GridQueue<int> tile_queue)
+{
+  static constexpr HistogramPolicy hp = current_policy<PolicySelector>();
+
+  namespace cg        = ::cooperative_groups;
+  cg::grid_group grid = cg::this_grid();
+
+  const unsigned int block_id     = (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+  const unsigned int thread_id    = block_id * blockDim.x + threadIdx.x;
+  const unsigned int grid_threads = gridDim.x * gridDim.y * gridDim.z * blockDim.x;
+
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int channel = 0; channel < NumActiveChannels; ++channel)
+  {
+    const unsigned int channel_bins = static_cast<unsigned int>(num_output_bins_wrapper[channel]);
+    for (unsigned int bin = thread_id; bin < channel_bins; bin += grid_threads)
+    {
+      d_output_histograms_wrapper[channel][bin] = OutputCounterT{};
+    }
+  }
+  if (thread_id == 0)
+  {
+    tile_queue.ResetDrain();
+  }
+  grid.sync();
+
+  using AgentHistogramPolicyT = agent_histogram_policy<
+    hp.threads_per_block,
+    hp.pixels_per_thread,
+    hp.load_algorithm,
+    hp.load_modifier,
+    hp.rle_compress,
+    hp.mem_preference,
+    hp.use_work_stealing,
+    hp.vec_size,
+    hp.warp_coalesce>;
+  using AgentHistogramT =
+    AgentHistogram<AgentHistogramPolicyT,
+                   PrivatizedSmemBins,
+                   NumChannels,
+                   NumActiveChannels,
+                   SampleIteratorT,
+                   CounterT,
+                   PrivatizedDecodeOpT,
+                   OutputDecodeOpT,
+                   OffsetT,
+                   /* UseDynamicSmemHistogram = */ true,
+                   OutputCounterT>;
+
+  __shared__ typename AgentHistogramT::TempStorage temp_storage;
+  extern __shared__ unsigned char dyn_smem_raw[];
+  CounterT* dyn_smem_histograms = reinterpret_cast<CounterT*>(dyn_smem_raw);
+
+  OutputDecodeOpT output_decode_op[NumActiveChannels];
+  PrivatizedDecodeOpT privatized_decode_op[NumActiveChannels];
+  _CCCL_PRAGMA_UNROLL_FULL()
+  for (int channel = 0; channel < NumActiveChannels; ++channel)
+  {
+    output_decode_op[channel]     = output_decode_op_wrapper[channel];
+    privatized_decode_op[channel] = privatized_decode_op_wrapper[channel];
+    output_decode_op[channel].PrecomputeOnDevice();
+    privatized_decode_op[channel].PrecomputeOnDevice();
+  }
+
+  AgentHistogramT agent(
+    temp_storage,
+    d_samples,
+    num_output_bins_wrapper.data(),
+    num_privatized_bins_wrapper.data(),
+    d_output_histograms_wrapper.data(),
+    d_privatized_histograms_wrapper.data(),
+    output_decode_op,
+    privatized_decode_op,
+    dyn_smem_histograms);
+
+  agent.InitBinCounters();
+  agent.ConsumeTiles(num_row_pixels, num_rows, row_stride_samples, tiles_per_row, tile_queue);
+  agent.StoreOutput();
   _CCCL_PDL_TRIGGER_NEXT_LAUNCH();
 }
 } // namespace detail::histogram

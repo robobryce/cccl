@@ -19,7 +19,9 @@ d = {k: v for k, v in d.items() if not k.startswith("_")}
 # *_nocoal variants get distinct tags (same family letter, "0" = coalesce off).
 TAG = {
     "smem_static": "SST",
+    "smem_cooperative_static": "CST",
     "smem_dynamic": "SDY",
+    "smem_cooperative_dynamic": "CDY",
     "hybrid": "HYB",
     "gmem_privatized_nocache": "GPN",
     "gmem_privatized_agent": "GPA",
@@ -42,7 +44,9 @@ TAG = {
 }
 NAME = {
     "SST": "smem static",
+    "CST": "cooperative direct-output static smem",
     "SDY": "smem dynamic",
+    "CDY": "cooperative direct-output dynamic smem",
     "HYB": "hybrid (smem+gmem)",
     "GPN": "cooperative gmem-priv no-cache",
     "GPA": "AgentHistogram gmem-priv no-cache",

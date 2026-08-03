@@ -147,7 +147,21 @@ ALGO_STYLE = {
     # smem_static / smem_dynamic at <=256 bins): the two privatized-SMEM kernel
     # instantiations measured head-to-head.
     "smem_static": ("#8c564b", "h", "smem privatized (static <=256)", "-", 1.6),
+    "smem_cooperative_static": (
+        "#d62728",
+        "o",
+        "cooperative direct-output (static <=256)",
+        "--",
+        1.5,
+    ),
     "smem_dynamic": ("#1f77b4", "D", "smem privatized (dynamic)", "--", 1.3),
+    "smem_cooperative_dynamic": (
+        "#2ca02c",
+        "s",
+        "cooperative direct-output (dynamic)",
+        ":",
+        1.5,
+    ),
     # No-warp-coalesce variants (histogram_algo_sweep.py forces these against the
     # .nocoal binaries). Same base color as the coalesce-on kernel, dotted + open
     # marker to read as "the same algorithm with coalescing disabled".
@@ -203,7 +217,9 @@ ALGO_TAG = {
     "main": "BAS",  # baseline (upstream main); 3 letters like the rest, ties to "speedup vs baseline"
     "default": "DEF",
     "smem_static": "SST",
+    "smem_cooperative_static": "CST",
     "smem_dynamic": "SDY",
+    "smem_cooperative_dynamic": "CDY",
     # no-warp-coalesce variants (match histogram_wins_table.py tags)
     "gmem_privatized_nocache__nocoal": "GN0",
     "direct_nocache__nocoal": "DN0",
@@ -224,7 +240,9 @@ ALGO_TAG = {
 # proxy entries its SST / SDY / DAS point labels would not appear in the legend.
 SELECTED_TAG_ALGO = {
     "SST": "smem_static",
+    "CST": "smem_cooperative_static",
     "SDY": "smem_dynamic",
+    "CDY": "smem_cooperative_dynamic",
     "SMP": "smem_privatized",
     "HYB": "hybrid",
     "GPN": "gmem_privatized_nocache",
@@ -349,7 +367,9 @@ def grouped_legend_handles(handles, ncols):
 ALGO_ORDER = [
     "smem_privatized",
     "smem_static",
+    "smem_cooperative_static",
     "smem_dynamic",
+    "smem_cooperative_dynamic",
     "gmem_privatized_agent",
     "hybrid",
     "gmem_privatized_cuckoo",

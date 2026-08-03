@@ -12,8 +12,8 @@ HERE="cub/benchmarks/bench/histogram"
 PY=/home/shadeform/.local/viz-venv/bin/python3
 RUN_TAG="${1:?usage: run_perbinary_sweep.sh <run_tag> [extra args]}"; shift || true
 OUT="autocuda/results/${RUN_TAG}"
-BRANCH_BIN="build/autocuda/cub-benchmark/bin"
-MAIN_BIN="/home/shadeform/cccl/autocuda/worktrees/main-baseline/build/cub-benchmark/bin"
+BRANCH_BIN="${HIST_SWEEP_BRANCH_BIN:-build/autocuda/cub-benchmark/bin}"
+MAIN_BIN="${HIST_SWEEP_MAIN_BIN:-/home/shadeform/cccl/autocuda/worktrees/main-baseline/build/cub-benchmark/bin}"
 mkdir -p "$OUT"
 
 # Sweep grid (override per-axis via the HIST_SWEEP_{BINS,ELEMENTS,SAMPLES,SHAPES} env
@@ -37,11 +37,13 @@ MERGED="$OUT/algo_sweep_full.json"
 # Hit-rate instrumentation is independent of the performance JSON. Run every
 # hit-rate leg first so even an interrupted long performance sweep leaves complete
 # hit-rate panels ready for all performance data collected so far.
-for B in even range multi_even multi_range; do
-  echo "=== [$(date +%H:%M:%S)] HIT-RATE PASS: $B ==="
-  HIST_SWEEP_OUTDIR="$OUT" HIST_BENCH_BINDIR="$BRANCH_BIN" \
-    "$PY" "$HERE/histogram_hitrate_sweep.py" "$B" || true
-done
+if [[ "${HIST_SWEEP_SKIP_HITRATE:-0}" != 1 ]]; then
+  for B in even range multi_even multi_range; do
+    echo "=== [$(date +%H:%M:%S)] HIT-RATE PASS: $B ==="
+    HIST_SWEEP_OUTDIR="$OUT" HIST_BENCH_BINDIR="$BRANCH_BIN" \
+      "$PY" "$HERE/histogram_hitrate_sweep.py" "$B" || true
+  done
+fi
 
 # Order: do single-channel even/range first (faster, no 1G/2G skip), then multi.
 for B in even range multi_even multi_range; do
@@ -51,7 +53,8 @@ for B in even range multi_even multi_range; do
     --branch-bin-dir "$BRANCH_BIN" --main-bin-dir "$MAIN_BIN" \
     --binaries "$B" --samples "${SAMPLES_ARGS[@]}" --bins "${BINS_ARGS[@]}" \
     --elements "${ELEMENTS_ARGS[@]}" --shapes "${SHAPES_ARGS[@]}" \
-    --repeats 3 --min-time 0.02 --timeout 180 --out "$PARTIAL" "$@"
+    --repeats "${HIST_SWEEP_REPEATS:-3}" --min-time "${HIST_SWEEP_MIN_TIME:-0.02}" \
+    --timeout "${HIST_SWEEP_TIMEOUT:-180}" --out "$PARTIAL" "$@"
   if [[ ! -s "$PARTIAL" ]]; then echo "!! $B produced no JSON; skipping"; continue; fi
 
   # Merge this binary's perf data into the cumulative MERGED file.
