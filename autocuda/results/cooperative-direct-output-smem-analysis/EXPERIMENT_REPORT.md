@@ -19,7 +19,7 @@ per-block global staging slab and do not perform an atomic-free gather.
 ## Source and machine provenance
 
 - Experiment branch: `pr/histocache/cooperative-direct-output-smem`.
-- Implementation and result commit: `268567ee3706b6caa4d4ec3eeddd26748f9980c7`.
+- Implementation and result commit: `268567ee37fa5b108e12e2f05132708f9d302f11`.
 - Raw branch base: `f16c464e64d5786de2e0bf536479e0ef9ae57b30`.
 - Main-overlay benchmark source: `0ad3f9967aba832e768f5e3a52bcd5900454d22c` plus the raw experiment's input-generator overlay. The established binaries report a dirty source tree because of that overlay.
 - Current `upstream/main` observed during the experiment: `5e1fc1691f9d93ed90dd463fe290c7022015c55f`.
